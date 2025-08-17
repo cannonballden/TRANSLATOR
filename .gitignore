@@ -1,0 +1,29 @@
+# --- Python / env ---
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+
+# --- IDE / OS ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# --- Project scratch / big generated files ---
+uploads/
+examples/**/*.mp4
+examples/**/*.webm
+examples/**/*.ogv
+examples/**/*.ogg
+examples/**/*.wav
+server/*_frames*/
+*.log
+
+# --- Caches ---
+.cache/
+.pytest_cache/
+.mypy_cache/
