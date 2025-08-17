@@ -1,0 +1,11 @@
+species: "African Savanna Elephant (Loxodonta africana)"
+behaviors:
+  defensive_trumpet:
+    description: "High-arousal trumpet + ear-spread and/or forward approach."
+    evidence: ["audio: trumpet", "vision: ear_spread OR approach"]
+  contact_rumble:
+    description: "Low-frequency rumble (cohesion/contact)."
+    evidence: ["audio: rumble (<80 Hz energy, low centroid)"]
+  foraging_resting:
+    description: "Slow or stationary movement; no high-arousal audio."
+    evidence: ["vision: still", "audio: none"]

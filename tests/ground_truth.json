@@ -1,0 +1,6 @@
+[
+  {"file":"elephant_trumpet.ogg","segments":[{"start":0.0,"end":1.5,"label":"defensive_trumpet"}]},
+  {"file":"elephants_feeding.ogv","segments":[{"start":3.0,"end":20.0,"label":"foraging_resting"}]},
+  {"file":"elephants_hyderabad.webm","segments":[{"start":0.0,"end":15.0,"label":"foraging_resting"}]},
+  {"file":"infrasound_doc_clip.webm","segments":[{"start":5.0,"end":10.0,"label":"contact_rumble"}]}
+]
