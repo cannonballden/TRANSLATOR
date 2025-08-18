@@ -1,16 +1,13 @@
-# server/analyzer.py  (NEW FILE)
-
 from pathlib import Path
 import time
 
 def analyze_media(filepath: str):
     """
-    Minimal stub so /analyze returns a valid JSON and CORS headers flow.
+    Minimal stub so /analyze returns valid JSON.
     Replace with real analysis later.
     """
     p = Path(filepath)
-    time.sleep(0.3)  # tiny delay to simulate work
-
+    time.sleep(0.3)
     return {
         "file": p.name,
         "species": {"label": "African elephant (stub)", "confidence": 0.82},
