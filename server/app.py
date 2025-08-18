@@ -28,7 +28,7 @@ def health():
 @app.post("/analyze")
 async def analyze(file: UploadFile = File(...)):
     # Lazy import => heavy ML loads only when /analyze is actually called
-    from analyzer import analyze_media
+    from .analyzer import analyze_media
 
     ext = Path(file.filename).suffix.lower()
     if ext not in SUPPORTED_VIDEO.union(SUPPORTED_AUDIO):
