@@ -1,102 +1,147 @@
-const fileInput = document.getElementById('fileInput');
-const analyzeBtn = document.getElementById('analyzeBtn');
-const statusEl = document.getElementById('status');
-const videoEl = document.getElementById('player');
-const timeline = document.getElementById('timeline');
-const segList = document.getElementById('segments');
-const summaryEl = document.getElementById('summary');
-const modal = document.getElementById('explainModal');
-const explainText = document.getElementById('explainText');
-const closeModal = document.getElementById('closeModal');
+(function(){
+  const $ = (sel)=>document.querySelector(sel);
+  const serverInput = $('#serverUrl');
+  const saveBtn = $('#saveServer');
+  const healthBtn = $('#checkHealth');
+  const healthStatus = $('#healthStatus');
+  const fileInput = $('#fileInput');
+  const analyzeBtn = $('#analyzeBtn');
+  const statusEl = $('#status');
+  const results = $('#results');
+  const summaryEl = $('#summary');
+  const timelineEl = $('#timeline');
+  const playbyplayEl = $('#playbyplay');
 
-closeModal.onclick = () => modal.classList.add('hidden');
+  // Load persisted server URL
+  const saved = localStorage.getItem('serverUrl') || '';
+  if (saved) serverInput.value = saved;
 
-fileInput.addEventListener('change', () => {
-  const f = fileInput.files[0];
-  analyzeBtn.disabled = !f;
-  if (f && f.type.startsWith('video/')) {
-    videoEl.src = URL.createObjectURL(f);
-    videoEl.load();
-  } else {
-    videoEl.removeAttribute('src');
-    videoEl.load();
+  function normUrl(u){
+    if(!u) return '';
+    return u.replace(/\/+$/,'');
   }
-});
 
-function drawTimeline(segments, duration=60) {
-  const ctx = timeline.getContext('2d');
-  const w = timeline.width = timeline.clientWidth;
-  const h = timeline.height = 40;
-  ctx.clearRect(0,0,w,h);
-  const colors = {
-    defensive_trumpet: '#e74c3c',
-    contact_rumble: '#3498db',
-    foraging_resting: '#27ae60',
-    uncertain: '#bdc3c7'
-  };
-  segments.forEach(s => {
-    const x0 = Math.max(0, (s.start/duration)*w);
-    const x1 = Math.min(w, (s.end/duration)*w);
-    ctx.fillStyle = colors[s.label] || '#aaa';
-    ctx.fillRect(x0, 0, Math.max(1, x1-x0), h);
-  });
-  const legend = document.getElementById('legend');
-  legend.innerHTML = Object.entries(colors)
-    .map(([k,v]) => `<span style="display:inline-block;width:12px;height:12px;background:${v};vertical-align:middle;margin-right:6px;border-radius:2px"></span>${k}`)
-    .join(' &nbsp; ');
-}
-
-async function analyzeFile(f) {
-  statusEl.textContent = 'Uploading…';
-  const form = new FormData();
-  form.append('file', f, f.name);
-  const SERVER = (localStorage.getItem('serverUrl') || 'http://localhost:8000');
-  const resp = await fetch(`${SERVER}/analyze`, { method: 'POST', body: form });
-  if (!resp.ok) {
-    const msg = await resp.text();
-    throw new Error(`Server error: ${resp.status} ${msg}`);
+  function setServer(){
+    const u = normUrl(serverInput.value.trim());
+    if(!u){ alert('Paste your Codespaces server URL first.'); return; }
+    localStorage.setItem('serverUrl', u);
+    statusEl.textContent = 'Server saved.';
+    return u;
   }
-  return await resp.json();
-}
 
-function renderResults(res) {
-  summaryEl.textContent = `${res.summary.text} (confidence ${(res.summary.confidence*100).toFixed(0)}%)`;
-  segList.innerHTML = '';
-  const durationGuess = Math.max(...res.segments.map(s => s.end), 10);
-  drawTimeline(res.segments, durationGuess);
-  res.segments.forEach((s) => {
-    const li = document.createElement('li');
-    const left = document.createElement('div');
-    left.innerHTML = `<span class="seg-label">${s.label}</span>
-      <span class="seg-time">${s.start.toFixed(1)}s → ${s.end.toFixed(1)}s</span>`;
-    const right = document.createElement('div');
-    right.innerHTML = `<span class="seg-conf">${(s.confidence*100).toFixed(0)}%</span>`;
-    const btn = document.createElement('button');
-    btn.className = 'explain-btn';
-    btn.textContent = 'Explain';
-    btn.onclick = () => {
-      explainText.textContent = JSON.stringify(s.explanation, null, 2);
-      modal.classList.remove('hidden');
-    };
-    right.appendChild(btn);
-    li.appendChild(left); li.appendChild(right);
-    segList.appendChild(li);
-  });
-}
-
-analyzeBtn.addEventListener('click', async () => {
-  const f = fileInput.files[0];
-  if (!f) return;
-  analyzeBtn.disabled = true;
-  statusEl.textContent = 'Analyzing… (first run may fetch model weights)';
-  try {
-    const res = await analyzeFile(f);
-    renderResults(res);
-    statusEl.textContent = `Species: ${res.species}  (p≈${(res.species_confidence*100).toFixed(0)}%)`;
-  } catch (e) {
-    console.error(e);
-    statusEl.textContent = e.message;
-  } finally {
-    analyzeBtn.disabled = false;
+  async function checkHealth(){
+    const u = normUrl(serverInput.value.trim() || localStorage.getItem('serverUrl') || '');
+    if(!u){ alert('Set server URL first.'); return; }
+    try{
+      healthStatus.textContent = 'checking…';
+      const r = await fetch(u+'/health', {mode:'cors'});
+      if(!r.ok){ throw new Error('HTTP '+r.status); }
+      const j = await r.json();
+      healthStatus.textContent = 'ok ('+(j.api || 'api')+')';
+      healthStatus.style.color = '#38c172';
+    }catch(e){
+      healthStatus.textContent = 'unreachable';
+      healthStatus.style.color = '#ff5d5d';
+    }
   }
-});
+
+  function fmt(s){ return (Math.round(s*100)/100).toFixed(2)+'s'; }
+  function colorClass(label){
+    if(label.includes('trumpet')) return 'trumpet';
+    if(label.includes('rumble')) return 'rumble';
+    if(label.includes('growl')) return 'growl';
+    if(label.includes('resting')) return 'resting';
+    if(label.includes('alarm')) return 'trumpet';
+    if(label.includes('contact')) return 'rumble';
+    return 'calling';
+  }
+
+  function renderResult(j){
+    results.classList.remove('hidden');
+    summaryEl.textContent = `${j.summary}  (overall ${Math.round((j.overall_confidence||0)*100)}%)`;
+
+    // timeline
+    timelineEl.innerHTML = '';
+    const total = j.duration || (j.segments?.length ? (j.segments[j.segments.length-1].end||0) : 0) || 1;
+    (j.segments||[]).forEach(seg=>{
+      const left = (100 * (seg.start/total));
+      const width = (100 * ((seg.end-seg.start)/total));
+      const el = document.createElement('div');
+      el.className = `seg ${colorClass(seg.label)}`;
+      el.style.left = left+'%';
+      el.style.width = Math.max(1,width)+'%';
+      el.title = `${seg.label} (${fmt(seg.start)}–${fmt(seg.end)})`;
+      timelineEl.appendChild(el);
+    });
+
+    // play-by-play
+    playbyplayEl.innerHTML = '';
+    (j.segments||[]).forEach((seg, i)=>{
+      const row = document.createElement('div');
+      row.className = 'row';
+      const t = document.createElement('div');
+      t.className = 'time';
+      t.textContent = `${fmt(seg.start)}–${fmt(seg.end)}`;
+      const body = document.createElement('div');
+      const h = document.createElement('div');
+      h.className = 'label';
+      const conf = `, conf ${Math.round((seg.confidence||0)*100)}%`;
+      const mv = seg.movement?.level ? `, movement ${seg.movement.level}` : '';
+      h.textContent = `${seg.label}${conf}${mv}`;
+      const exp = document.createElement('details');
+      const sum = document.createElement('summary');
+      sum.textContent = 'Explain';
+      const pre = document.createElement('div');
+      pre.className = 'explain';
+      pre.textContent = seg.explanation || JSON.stringify(seg.features||{}, null, 2);
+      exp.appendChild(sum);
+      exp.appendChild(pre);
+      body.appendChild(h);
+      body.appendChild(exp);
+      row.appendChild(t);
+      row.appendChild(body);
+      playbyplayEl.appendChild(row);
+    });
+  }
+
+  async function analyze(){
+    statusEl.textContent = '';
+    const u = normUrl(serverInput.value.trim() || localStorage.getItem('serverUrl') || '');
+    if(!u){ alert('Set server URL first.'); return; }
+    const f = fileInput.files?.[0];
+    if(!f){ alert('Choose an audio/video file first.'); return; }
+
+    analyzeBtn.disabled = true;
+    analyzeBtn.textContent = 'Analyzing…';
+    statusEl.textContent = 'Uploading & analyzing…';
+
+    try{
+      const fd = new FormData();
+      fd.append('file', f, f.name);
+      const r = await fetch(u+'/analyze', { method:'POST', body: fd, mode:'cors' });
+      if(!r.ok){
+        const txt = await r.text().catch(()=> '');
+        throw new Error(`Server error ${r.status}: ${txt}`);
+      }
+      const j = await r.json();
+      renderResult(j);
+      statusEl.textContent = 'Done.';
+    }catch(e){
+      console.error(e);
+      statusEl.textContent = e.message || 'Failed.';
+      alert('Analyze failed: '+(e.message||e));
+    }finally{
+      analyzeBtn.disabled = false;
+      analyzeBtn.textContent = 'Analyze';
+    }
+  }
+
+  saveBtn.addEventListener('click', setServer);
+  healthBtn.addEventListener('click', checkHealth);
+  analyzeBtn.addEventListener('click', analyze);
+
+  // On load, if server saved, auto health-check (silent)
+  if (saved){
+    checkHealth();
+  }
+})();
