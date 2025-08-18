@@ -1,49 +1,60 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <title>Elephant Translator (Prototype)</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <link rel="stylesheet" href="styles.css">
+  <meta charset="utf-8" />
+  <title>Elephant Translator — Demo</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
 <header>
-  <h1>Elephant Translator <span class="beta">prototype</span></h1>
-  <p class="subtitle">Uploads audio/video → identifies elephant cues → time-aligned behavior labels</p>
+  <div class="wrap">
+    <h1>Elephant Translator <span class="badge">demo</span></h1>
+    <p class="tagline">Evidence-based cues from audio + motion (prototype)</p>
+  </div>
 </header>
 
-<section class="uploader">
-  <label class="file-label">
-    <input type="file" id="fileInput" accept=".mp4,.mov,.mkv,.avi,.webm,.ogv,.mp3,.wav,.ogg,.oga,.flac"/>
-    <span>Choose audio/video…</span>
-  </label>
-  <button id="analyzeBtn" disabled>Analyze</button>
-  <span id="status"></span>
-</section>
+<main class="wrap">
+  <section class="panel">
+    <h2>Server</h2>
+    <div class="server-bar">
+      <input id="serverUrl" type="url" placeholder="https://9010-…githubpreview.dev" />
+      <button id="saveServer">Save</button>
+      <button id="checkHealth">Health</button>
+      <span id="healthStatus" class="muted">not checked</span>
+    </div>
+    <p class="hint">Tip: paste your Codespaces Public URL here (no trailing slash). It is shown in the <b>Ports</b> panel for port <b>9010</b>.</p>
+  </section>
 
-<section class="player">
-  <video id="player" controls></video>
-  <canvas id="timeline" height="40"></canvas>
-  <div id="legend"></div>
-</section>
+  <section class="panel">
+    <h2>Analyze media</h2>
+    <div class="uploader">
+      <input id="fileInput" type="file" accept="audio/*,video/*" />
+      <button id="analyzeBtn">Analyze</button>
+      <span id="status" class="muted"></span>
+    </div>
+    <details class="tips">
+      <summary>Tips for best results</summary>
+      <ul>
+        <li>Use short clips (5–20 seconds), <b>&lt;= 10 MB</b> to avoid proxy limits.</li>
+        <li>Prefer <b>WAV</b> audio or common video (mp4/webm). Install <b>ffmpeg</b> in Codespaces for more formats.</li>
+        <li>Keep the animal visible and the mic close; avoid heavy wind and crowd noise.</li>
+        <li>The summary is heuristic: treat as guidance, not truth.</li>
+      </ul>
+    </details>
+  </section>
 
-<section class="results">
-  <h2>Play-by-play</h2>
-  <ul id="segments"></ul>
-  <h2>Summary</h2>
-  <div id="summary"></div>
-</section>
+  <section id="results" class="panel hidden">
+    <h2>Results</h2>
+    <div id="summary" class="summary"></div>
+    <div id="timeline"></div>
+    <div id="playbyplay"></div>
+  </section>
+</main>
 
-<footer>
-  <p>Models: FFmpeg + YAMNet + YOLOv8. This demo is conservative and will say “uncertain” when evidence is weak.</p>
+<footer class="wrap">
+  <p class="muted">This is a research prototype. Do not use to approach wildlife.</p>
 </footer>
-
-<div id="explainModal" class="modal hidden">
-  <div class="modal-content">
-    <button id="closeModal">×</button>
-    <pre id="explainText"></pre>
-  </div>
-</div>
 
 <script src="app.js"></script>
 </body>
