@@ -9,51 +9,72 @@
 <body>
 <header>
   <div class="wrap">
-    <h1>Elephant Translator <span class="badge">demo</span></h1>
-    <p class="tagline">Evidence-based cues from audio + motion (prototype)</p>
+    <h1>Elephant Translator <span class="badge">prototype</span></h1>
+    <p class="tagline">Heuristic audio + motion cues, conservatively interpreted</p>
   </div>
 </header>
 
 <main class="wrap">
   <section class="panel">
-    <h2>Server</h2>
-    <div class="server-bar">
-      <input id="serverUrl" type="url" placeholder="https://9010-…githubpreview.dev" />
+    <h2>1) Connect to your server</h2>
+    <div class="server-row">
+      <span class="dot" id="dot"></span>
+      <input id="serverUrl" type="url" placeholder="https://9010-…githubpreview.dev (no trailing slash)" />
       <button id="saveServer">Save</button>
       <button id="checkHealth">Health</button>
-      <span id="healthStatus" class="muted">not checked</span>
     </div>
-    <p class="hint">Tip: paste your Codespaces Public URL here (no trailing slash). It is shown in the <b>Ports</b> panel for port <b>9010</b>.</p>
+    <p class="muted small">Paste the <b>Public</b> URL from the <b>Ports</b> panel (port 9010). Click Health to verify connection.</p>
   </section>
 
   <section class="panel">
-    <h2>Analyze media</h2>
-    <div class="uploader">
+    <h2>2) Upload media</h2>
+    <div id="drop" class="drop">
       <input id="fileInput" type="file" accept="audio/*,video/*" />
+      <p>Drag & drop a short audio/video clip here (≤ 10–15 MB), or use the file picker.</p>
+    </div>
+    <div class="actions">
       <button id="analyzeBtn">Analyze</button>
+      <button id="downloadBtn" disabled>Download JSON</button>
       <span id="status" class="muted"></span>
+      <progress id="prog" value="0" max="100" class="hidden"></progress>
     </div>
     <details class="tips">
       <summary>Tips for best results</summary>
       <ul>
-        <li>Use short clips (5–20 seconds), <b>&lt;= 10 MB</b> to avoid proxy limits.</li>
-        <li>Prefer <b>WAV</b> audio or common video (mp4/webm). Install <b>ffmpeg</b> in Codespaces for more formats.</li>
-        <li>Keep the animal visible and the mic close; avoid heavy wind and crowd noise.</li>
-        <li>The summary is heuristic: treat as guidance, not truth.</li>
+        <li>Short clips (5–20s). Start small to avoid proxy limits.</li>
+        <li><b>ffmpeg</b> in Codespaces enables more formats + motion analysis.</li>
+        <li>Minimize wind and crowd noise; keep the subject visible.</li>
+        <li>Outputs are <b>heuristic</b> — treat them as hints, not facts.</li>
       </ul>
     </details>
   </section>
 
-  <section id="results" class="panel hidden">
-    <h2>Results</h2>
+  <section id="filters" class="panel hidden">
+    <h2>3) View</h2>
+    <div class="legend">
+      <span class="swatch trumpet">Trumpet</span>
+      <span class="swatch rumble">Rumble</span>
+      <span class="swatch roar">Roar</span>
+      <span class="swatch resting">Resting</span>
+      <span class="swatch chorus">Greeting chorus</span>
+    </div>
+    <div class="filter-row">
+      <label><input type="checkbox" data-f="trumpet" checked /> trumpet</label>
+      <label><input type="checkbox" data-f="rumble" checked /> rumbles</label>
+      <label><input type="checkbox" data-f="roar" checked /> roars</label>
+      <label><input type="checkbox" data-f="resting" checked /> resting</label>
+      <label><input type="checkbox" data-f="chorus" checked /> greeting</label>
+      <label><input type="checkbox" data-f="other" checked /> other</label>
+    </div>
     <div id="summary" class="summary"></div>
+    <div id="diagnostics" class="diag"></div>
     <div id="timeline"></div>
     <div id="playbyplay"></div>
   </section>
 </main>
 
-<footer class="wrap">
-  <p class="muted">This is a research prototype. Do not use to approach wildlife.</p>
+<footer class="wrap footnote">
+  <p class="muted small">Do not approach wildlife; this demo is not a behavioral guarantee.</p>
 </footer>
 
 <script src="app.js"></script>
