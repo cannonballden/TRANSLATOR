@@ -15,8 +15,8 @@ h1{margin:0;font-size:28px;display:flex;align-items:center;gap:.6rem}
 h2{margin:0 0 10px}
 .server-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .server-row input{flex:1;min-width:260px;padding:10px 12px;border-radius:8px;border:1px solid #2a3248;background:#0f1421;color:var(--ink)}
-.server-row button{padding:10px 14px;border-radius:8px;border:1px solid #2b3b55;background:#182642;color:#cfe5ff;cursor:pointer}
-.server-row button:hover{background:#1e2f4f}
+.server-row button,.button{padding:10px 14px;border-radius:8px;border:1px solid #2b3b55;background:#182642;color:#cfe5ff;cursor:pointer;text-decoration:none;display:inline-block}
+.server-row button:hover,.button:hover{background:#1e2f4f}
 .dot{width:10px;height:10px;border-radius:50%;background:#666;display:inline-block;border:1px solid #888}
 
 .drop{border:2px dashed #2b3250;border-radius:12px;padding:18px;text-align:center;background:#0f1421}
@@ -25,7 +25,7 @@ h2{margin:0 0 10px}
 #analyzeBtn{padding:10px 16px;border-radius:8px;border:1px solid #2e435e;background:#17304a;color:#cde7ff;cursor:pointer}
 #analyzeBtn:hover{background:#1a3a59}
 #downloadBtn{padding:10px 16px;border-radius:8px;border:1px solid #2e435e;background:#223450;color:#d6e8ff;cursor:pointer}
-#downloadBtn:disabled{opacity:.5;cursor:not-allowed}
+#downloadBtn[disabled]{opacity:.5;cursor:not-allowed}
 .muted{color:var(--muted)}
 .small{font-size:13px}
 .hidden{display:none}
@@ -57,10 +57,12 @@ progress{height:8px;width:240px}
 .seg.other{background:repeating-linear-gradient(45deg,#445,#445 8px,#222 8px,#222 16px)}
 
 #markers{position:relative;height:0}
-.marker{position:absolute;top:-4px;width:2px;height:28px;background:#aaa;opacity:.9}
+.marker{position:absolute;top:-4px;width:2px;height:28px;background:#aaa;opacity:.95}
 .marker.freeze{background:#75c1ff}
 .marker.stomp{background:#ff6262}
 .marker.ear{background:#9f7aea}
+.marker.threat{background:#ff3b30}
+.marker.greet{background:#36d1dc}
 .marker.coherent{background:#38c172}
 .marker.excite{background:#ffd47a}
 
