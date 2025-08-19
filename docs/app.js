@@ -37,7 +37,7 @@
   function normUrl(u){ return (u||'').trim().replace(/\/+$/,''); }
   function colorClass(label){
     const L = (label||'').toLowerCase();
-    if (L.includes('greeting')) return 'chorus';
+    if (L.includes('greeting chorus')) return 'chorus';
     if (L.includes('trumpet')) return 'trumpet';
     if (L.includes('roar')) return 'roar';
     if (L.includes('rumble')) return 'rumble';
@@ -53,11 +53,8 @@
     if (c==='chorus') return filters.chorus;
     return filters.other;
   }
-  function isVideo(file){
-    return file && file.type && file.type.startsWith('video');
-  }
+  function isVideo(file){ return file && file.type && file.type.startsWith('video'); }
 
-  // persist server URL
   const saved = localStorage.getItem('serverUrl') || '';
   if (saved) serverInput.value = saved;
 
@@ -126,12 +123,14 @@
     markersEl.innerHTML = '';
     if (!events || !events.length) return;
     events.forEach(ev=>{
-      if (ev.t == null) return; // global events
+      if (ev.t == null) return;
       const left = Math.max(0, Math.min(100, 100 * (ev.t / total)));
       const m = document.createElement('div');
       m.className = 'marker';
       const t = (ev.type || '').toLowerCase();
-      if (t.includes('freeze')) m.classList.add('freeze');
+      if (t.includes('ear spread')) m.classList.add('threat');
+      else if (t.includes('close-contact')) m.classList.add('greet');
+      else if (t.includes('freeze')) m.classList.add('freeze');
       else if (t.includes('stomp')) m.classList.add('stomp');
       else if (t.includes('ear')) m.classList.add('ear');
       else if (t.includes('coherent')) m.classList.add('coherent');
@@ -148,7 +147,7 @@
     summaryEl.textContent = `${j.summary} (overall ${Math.round((j.overall_confidence||0)*100)}%)`;
     const di = j.diagnostics||{};
     const extra = (j.findings && j.findings.length) ? `; extra: ${j.findings.join(', ')}` : '';
-    diagEl.textContent = `Diagnostics — ffmpeg: ${di.ffmpeg?'yes':'no'}, numpy: ${di.numpy?'yes':'no'}, pillow: ${di.pillow?'yes':'no'}, opencv: ${di.opencv?'yes':'no'}${extra}`;
+    diagEl.textContent = `Diagnostics — ffmpeg: ${di.ffmpeg?'yes':'no'}, numpy: ${di.numpy?'yes':'no'}, pillow: ${di.pillow?'yes':'no'}, opencv: ${di.opencv?'yes':'no'}, yolo: ${di.yolo?'yes':'no'}${extra}`;
 
     const segs = j.segments||[];
     const total = j.duration || (segs.length ? segs[segs.length-1].end : 1) || 1;
@@ -176,10 +175,10 @@
       timelineEl.appendChild(d);
     });
 
-    // motion markers
+    // motion/interaction markers
     renderMarkers(total, j.motion_events || []);
 
-    // click-to-seek on timeline
+    // click-to-seek timeline
     timelineEl.onclick = (e)=>{
       const rect = timelineEl.getBoundingClientRect();
       const frac = Math.max(0, Math.min(1, (e.clientX - rect.left)/rect.width));
@@ -190,7 +189,7 @@
       }
     };
 
-    // play-by-play
+    // play-by-play table
     playEl.innerHTML = '';
     segs.forEach(seg=>{
       if (!fitsFilter(seg.label, filt)) return;
@@ -208,7 +207,6 @@
       exp.appendChild(sum); exp.appendChild(pre);
       body.appendChild(h); body.appendChild(exp);
       row.appendChild(t); row.appendChild(body);
-      // click row to seek to segment start
       row.onclick = ()=> {
         const start = seg.start || 0;
         if (!playerWrap.classList.contains('hidden')){
@@ -219,22 +217,20 @@
       playEl.appendChild(row);
     });
 
-    // enable download
+    // download JSON
     const blob = new Blob([JSON.stringify(j,null,2)], {type:'application/json'});
     downloadBtn.href = URL.createObjectURL(blob);
     downloadBtn.download = (j.file || 'analysis') + '.json';
-    downloadBtn.disabled = false;
+    downloadBtn.setAttribute('download', downloadBtn.download);
+    downloadBtn.removeAttribute('disabled');
   }
 
-  // Re-render when filters change (from lastResult)
   document.querySelectorAll('input[data-f]').forEach(cb=>{
-    cb.addEventListener('change', ()=>{
-      if (lastResult) renderResult(lastResult);
-    });
+    cb.addEventListener('change', ()=>{ if (lastResult) renderResult(lastResult); });
   });
 
   async function analyze(){
-    downloadBtn.disabled = true; downloadBtn.removeAttribute('href');
+    downloadBtn.setAttribute('disabled', 'true'); downloadBtn.removeAttribute('href');
 
     const u = normUrl(serverInput.value || localStorage.getItem('serverUrl') || '');
     if (!u) { alert('Set server URL first.'); return; }
@@ -259,7 +255,7 @@
         const j = await r.json(); prog.value = 100; renderResult(j);
         statusEl.textContent = 'Done.';
       } else {
-        // chunked
+        // chunked init
         const initR = await fetch(u+'/upload/init', {
           method:'POST', mode:'cors',
           headers:{'Content-Type':'application/json'},
@@ -268,23 +264,21 @@
         if (!initR.ok){ const t= await initR.text().catch(()=> ''); throw new Error(`Init failed: ${t}`.slice(0,300)); }
         const initJ = await initR.json();
         const uploadId = initJ.upload_id; const chunkBytes = initJ.chunk_bytes || (cfg.chunk_mb*1024*1024) || (5*1024*1024);
-
         const totalChunks = Math.ceil(f.size / chunkBytes);
+
+        // parts
         for (let i=0;i<totalChunks;i++){
           const start = i*chunkBytes; const end = Math.min(f.size, (i+1)*chunkBytes);
           const blob = f.slice(start, end);
-          const partR = await fetch(u+`/upload/part?upload_id=${uploadId}&index=${i}`, {
-            method:'POST', mode:'cors', body: blob
-          });
+          const partR = await fetch(u+`/upload/part?upload_id=${uploadId}&index=${i}`, { method:'POST', mode:'cors', body: blob });
           if (!partR.ok){ const t= await partR.text().catch(()=> ''); throw new Error(`Chunk ${i} failed: ${t}`.slice(0,300)); }
           prog.value = Math.round( ( (i+1)/totalChunks ) * 80 );
           statusEl.textContent = `Uploaded ${i+1}/${totalChunks} chunks…`;
         }
 
+        // finish -> analyze
         analyzeBtn.textContent = 'Analyzing…'; statusEl.textContent = 'Analyzing on server…';
-        const finR = await fetch(u+`/upload/finish?upload_id=${uploadId}&include_motion=${String(includeMotion)}&total_chunks=${totalChunks}`, {
-          method:'POST', mode:'cors'
-        });
+        const finR = await fetch(u+`/upload/finish?upload_id=${uploadId}&include_motion=${String(includeMotion)}&total_chunks=${totalChunks}`, { method:'POST', mode:'cors' });
         if (!finR.ok){ const t= await finR.text().catch(()=> ''); throw new Error(`Finish failed: ${t}`.slice(0,300)); }
         prog.value = 95;
         const j = await finR.json(); prog.value = 100; renderResult(j);
@@ -302,7 +296,7 @@
 
   analyzeBtn.addEventListener('click', analyze);
 
-  // On load: auto health/config if server already set
+  // auto health on load if saved
   const savedUrl = localStorage.getItem('serverUrl');
   if (savedUrl){ (async ()=>{ await checkHealth(); })(); }
 })();
