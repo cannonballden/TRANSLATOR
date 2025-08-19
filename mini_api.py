@@ -1,11 +1,12 @@
-# mini_api.py — large-file + richer heuristics + optional optical-flow motion
-# - Small files: /analyze (direct)
-# - Large files: /upload/init, /upload/part, /upload/finish (chunked)
-# - Audio: centroid, bands, flatness, rolloff, flux, tonality, peak, centroid slope
-# - Motion: frame-diff series (always if ffmpeg+pillow+numpy), optional optical flow if opencv-python available
-# - Conservative outputs with clear uncertainty; robust fallbacks
+# mini_api.py — large-file + audio heuristics + video interactions (YOLO optional)
+# Features:
+#  - Small files: /analyze (direct). Large files: /upload/init + /upload/part + /upload/finish (chunked).
+#  - Audio: rumble/trumpet/roar/etc. via spectral features (centroid, bands, flatness, rolloff, flux, tonality, slope).
+#  - Motion: frame-diff series, freeze, stomp spikes, ear-flap periodicity; optional optical flow (coherent movement).
+#  - Interactions (video): close-contact trunk greeting, ear-spread threat (needs detections; best with YOLO).
+#  - Conservative interpretation; graceful fallbacks when deps (ffmpeg/numpy/Pillow/OpenCV/YOLO) aren’t present.
 
-import os, json, shutil, subprocess, uuid, logging, wave, contextlib, glob
+import os, json, shutil, subprocess, uuid, logging, wave, contextlib, glob, math
 from pathlib import Path
 from typing import List, Dict, Any, Tuple, Optional
 
@@ -13,7 +14,7 @@ from fastapi import FastAPI, UploadFile, File, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-# Optional deps (graceful degradation)
+# Optional deps (all have fallbacks)
 try:
     import numpy as np
 except Exception:
@@ -25,15 +26,22 @@ except Exception:
 try:
     import cv2
 except Exception:
-    cv2 = None  # optical flow is optional
+    cv2 = None
+try:
+    from ultralytics import YOLO
+except Exception:
+    YOLO = None
+
+YOLO_MODEL = None
+YOLO_ELE_IDS: Optional[List[int]] = None
 
 log = logging.getLogger("mini_api")
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
 # ---------- Config ----------
 PAGES_ORIGIN = os.getenv("PAGES_ORIGIN", "https://cannonballden.github.io")
-SMALL_UPLOAD_MAX_MB = int(os.getenv("SMALL_UPLOAD_MAX_MB", "50"))  # direct /analyze limit (was 25)
-MAX_MB = int(os.getenv("MAX_MB", "1024"))                          # absolute hard cap for chunked
+SMALL_UPLOAD_MAX_MB = int(os.getenv("SMALL_UPLOAD_MAX_MB", "50"))
+MAX_MB = int(os.getenv("MAX_MB", "1024"))
 CHUNK_MB = int(os.getenv("CHUNK_MB", "5"))
 CHUNK_BYTES = CHUNK_MB * 1024 * 1024
 
@@ -48,10 +56,10 @@ for d in (UPLOAD_DIR, SESS_DIR, FRAME_DIR):
     d.mkdir(exist_ok=True, parents=True)
 
 # ---------- App ----------
-app = FastAPI(title="Elephant Translator — API (large-file + video)")
+app = FastAPI(title="Elephant Translator — API (large-file + video + interactions)")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[PAGES_ORIGIN],  # scheme+host (no path)
+    allow_origins=[PAGES_ORIGIN],  # origin only (scheme+host)
     allow_methods=["*"],
     allow_headers=["*"],
     allow_credentials=False,
@@ -151,7 +159,6 @@ def spectral_features(frame: "np.ndarray", sr: int, prev_mag: Optional["np.ndarr
     return feat, mag
 
 def classify_audio(x: "np.ndarray", sr: int):
-    """Return (segments, duration, findings) — findings are global notes (e.g., antiphony)."""
     idx = frame_audio(x, sr, win_s=0.6, hop_s=0.3)
     feats = []; prev_mag = None
     for (s, e) in idx:
@@ -170,36 +177,28 @@ def classify_audio(x: "np.ndarray", sr: int):
     dur = len(x) / sr
 
     labels = []
-    tonal_marks = []  # (t, peak_freq)
+    tonal_marks = []
     for i, (samp, (s0, s1)) in enumerate(zip(feats, idx)):
         start_t = s0 / sr; end_t = s1 / sr
-        label, conf, reasons = "calling", 0.55, []
+        label, conf = "calling", 0.55
 
         if samp["rms"] > max(energy_hi, energy_med * 1.6) and samp["high_r"] > 0.35 and samp["centroid"] > 1200:
             label = "trumpet"; conf = min(0.97, 0.65 + 0.4*samp["high_r"] + 0.0001*(samp["centroid"]-1200))
-            reasons.append("bright high-band energy & high centroid")
         elif samp["rms"] > energy_med * 0.8 and samp["low_r"] > 0.33 and samp["centroid"] < 180 and samp["flatness"] < 0.5:
             label = "contact rumble"; conf = min(0.92, 0.6 + 0.5*samp["low_r"])
-            reasons.append("strong low-frequency energy, smooth spectrum")
         elif samp["rms"] > energy_med * 0.9 and samp["low_r"] > 0.28 and slope[i] > 30 and samp["centroid"] < 260:
             label = "let’s‑go rumble (matriarch)"; conf = min(0.9, 0.55 + 0.5*min(1.0, slope[i]/120.0))
-            reasons.append("low band + rising centroid/energy")
         elif samp["rms"] > energy_med * 0.9 and samp["low_r"] > 0.25 and samp["flatness"] > 0.6 and samp["centroid"] < 220:
             label = "musth‑like buzz (male)"; conf = min(0.86, 0.5 + 0.6*(samp["flatness"] - 0.6 + samp["low_r"]))
-            reasons.append("low centroid with buzzy flat spectrum")
         elif samp["rms"] > energy_med and samp["upper_mid_r"] > 0.28 and samp["flatness"] > 0.55:
             label = "roar / rumble‑roar"; conf = min(0.9, 0.55 + 0.5*samp["upper_mid_r"])
-            reasons.append("harsh mid/upper-mid energy")
         elif 250 <= samp["centroid"] <= 600 and samp["rms"] > energy_med * 0.8 and (s1 - s0) / sr <= 0.75:
             label = "estrous rumble (female)"; conf = 0.72
-            reasons.append("short, higher‑pitched rumble")
         elif samp["rms"] < energy_med * 0.6:
             label = "resting / low arousal"; conf = min(0.82, 0.6 + (energy_med*0.6 - samp["rms"])*3.0)
-            reasons.append("low overall energy")
         else:
             if samp["tonality"] > 0.22 and samp["low_r"] > 0.2 and 80 < samp["peak_freq"] < 400:
                 label = "possible individual‑address rumble (uncertain)"; conf = 0.62
-                reasons.append("tonal narrowband peak")
         if samp["tonality"] > 0.22 and 60 < samp["peak_freq"] < 500:
             tonal_marks.append((start_t, samp["peak_freq"]))
 
@@ -215,7 +214,7 @@ def classify_audio(x: "np.ndarray", sr: int):
             "features": samp
         })
 
-    # Merge contiguous same-label segments
+    # merge contiguous same-label segments
     merged = []
     for seg in labels:
         if merged and merged[-1]["label"] == seg["label"] and abs(merged[-1]["end"] - seg["start"]) < 1e-6:
@@ -224,7 +223,7 @@ def classify_audio(x: "np.ndarray", sr: int):
         else:
             merged.append(seg)
 
-    # Greeting chorus: overlaps (rumble + trumpet/roar) within ~2s
+    # greeting chorus: rumble + trumpet/roar overlap within ~2s
     for i in range(len(merged)):
         for j in range(i+1, len(merged)):
             a, b = merged[i], merged[j]
@@ -235,15 +234,12 @@ def classify_audio(x: "np.ndarray", sr: int):
                 ("trumpet" in b["label"] or "roar" in b["label"]) and ("rumble" in a["label"])
             )
             if chorus_pair and min(a["end"], b["end"]) - max(a["start"], b["start"]) > -1.0:
-                a["label"] = "greeting chorus (family reunion)"
-                b["label"] = "greeting chorus (family reunion)"
+                a["label"] = b["label"] = "greeting chorus (family reunion)"
                 a["confidence"] = b["confidence"] = min(0.95, max(a["confidence"], b["confidence"]) + 0.05)
 
     findings = []
-
-    # Possible antiphonal exchange: two rumble-like segments with ~1–5s gap
-    last_end = None
-    last_is_rumble = False
+    # antiphonal timing
+    last_end = None; last_is_rumble = False
     for s in merged:
         is_rumbleish = "rumble" in s["label"]
         if last_is_rumble and is_rumbleish and last_end is not None:
@@ -251,10 +247,9 @@ def classify_audio(x: "np.ndarray", sr: int):
             if 1.0 <= gap <= 5.0:
                 findings.append("possible antiphonal exchange (call-and-response timing)")
                 break
-        last_is_rumble = is_rumbleish
-        last_end = s["end"]
+        last_is_rumble = is_rumbleish; last_end = s["end"]
 
-    # Possible individual-address: repeated tonal peak near same freq with 8–20s separation
+    # repeated tonal peak → possible individual-address
     if len(tonal_marks) >= 2:
         tonal_marks.sort()
         for i in range(len(tonal_marks)-1):
@@ -265,12 +260,14 @@ def classify_audio(x: "np.ndarray", sr: int):
 
     return merged, float(dur), findings
 
-def extract_frames(path: Path, out_dir: Path, fps: float = 2.0, width: int = 224) -> bool:
+# ---------- Frames & motion ----------
+def extract_frames(path: Path, out_dir: Path, fps: float = 2.0, width: int = 256) -> bool:
     if not has_ffmpeg(): return False
     for f in glob.glob(str(out_dir / "frame_*.png")):
         try: os.remove(f)
         except Exception: pass
-    ok, out = _run(["ffmpeg","-y","-i",str(path),"-vf",f"fps={fps},scale={width}:-1,format=gray",str(out_dir/"frame_%05d.png")])
+    # keep color for detectors; we’ll grayify for motion later
+    ok, out = _run(["ffmpeg","-y","-i",str(path),"-vf",f"fps={fps},scale={width}:-1",str(out_dir/"frame_%05d.png")])
     if not ok: log.warning("ffmpeg frames failed: %s", out)
     return ok
 
@@ -279,21 +276,18 @@ def motion_series(out_dir: Path) -> List[float]:
     files = sorted(Path(out_dir).glob("frame_*.png"))
     if len(files) < 2: return []
     vals = []
-    prev = np.array(Image.open(files[0]), dtype=np.float32)
+    prev = np.array(Image.open(files[0]).convert("L"), dtype=np.float32)
     for f in files[1:]:
-        cur = np.array(Image.open(f), dtype=np.float32)
+        cur = np.array(Image.open(f).convert("L"), dtype=np.float32)
         vals.append(float(np.mean(np.abs(cur - prev)) / 255.0))
         prev = cur
     return vals
 
 def optical_flow_series(out_dir: Path, fps: float = 2.0) -> Dict[str, Any]:
-    """Return mean magnitude per step + coherence and events (requires cv2 + numpy)."""
     if cv2 is None or np is None: return {}
     files = sorted(Path(out_dir).glob("frame_*.png"))
     if len(files) < 2: return {}
-    mags = []; coh = []
-    events = []
-    mean_vecs = []  # (vx, vy) per step
+    mags = []; coh = []; mean_vecs = []
     prev = cv2.imread(str(files[0]), cv2.IMREAD_GRAYSCALE)
     for f in files[1:]:
         cur = cv2.imread(str(f), cv2.IMREAD_GRAYSCALE)
@@ -304,13 +298,11 @@ def optical_flow_series(out_dir: Path, fps: float = 2.0) -> Dict[str, Any]:
         mvx = float(np.mean(vx)); mvy = float(np.mean(vy))
         mean_vecs.append((mvx, mvy))
         denom = float(np.mean(mag) + 1e-6)
-        coh.append(float((np.hypot(mvx, mvy)) / denom))
+        coh.append(float((math.hypot(mvx, mvy)) / denom))
         prev = cur
-
-    arr = np.array(mags, dtype=np.float32)
-    if len(arr) > 4:
-        med = float(np.median(arr)); std = float(np.std(arr))
-        # coherent movement when magnitude is high and coherence > 0.5 for ≥ 1s
+    events = []
+    if len(mags) > 4:
+        med = float(np.median(mags)); std = float(np.std(mags))
         run = 0
         for i, (m, c) in enumerate(zip(mags, coh)):
             if m > med + 1.0*std and c > 0.5: run += 1
@@ -322,7 +314,7 @@ def optical_flow_series(out_dir: Path, fps: float = 2.0) -> Dict[str, Any]:
         if run >= int(1*fps):
             t = int((len(mags) - run/2)/fps)
             events.append({"t": t, "type": "coherent movement (group moving)", "detail": f"~{run/fps:.1f}s"})
-    return {"mag": mags, "coh": coh, "events": events}
+    return {"mag": mags, "coh": coh, "mean_vecs": mean_vecs, "events": events}
 
 def detect_motion(vals: List[float], fps: float = 2.0) -> Dict[str, Any]:
     out = {"series": vals, "events": []}
@@ -366,6 +358,157 @@ def detect_motion(vals: List[float], fps: float = 2.0) -> Dict[str, Any]:
         out["events"].append({"t": None, "type": "high excitement (motion)", "detail": "sustained elevated motion"})
     return out
 
+# ---------- Interactions (YOLO optional) ----------
+def load_yolo() -> bool:
+    global YOLO_MODEL, YOLO_ELE_IDS
+    if YOLO is None:
+        return False
+    if YOLO_MODEL is None:
+        try:
+            YOLO_MODEL = YOLO("yolov8n.pt")  # auto-download in Codespaces
+            names = None
+            try:
+                # ultralytics 8.x
+                names = YOLO_MODEL.model.names
+            except Exception:
+                try:
+                    names = YOLO_MODEL.names
+                except Exception:
+                    names = None
+            YOLO_ELE_IDS = None
+            if names is not None:
+                if isinstance(names, dict):
+                    YOLO_ELE_IDS = [i for i, n in names.items() if isinstance(n, str) and n.lower() == "elephant"]
+                elif isinstance(names, (list, tuple)):
+                    YOLO_ELE_IDS = [i for i, n in enumerate(names) if isinstance(n, str) and n.lower() == "elephant"]
+        except Exception as e:
+            log.warning("YOLO load failed: %s", e)
+            YOLO_MODEL = None
+            return False
+    return YOLO_MODEL is not None
+
+def yolo_detect_frames(out_dir: Path, img_size: int = 640, conf: float = 0.25):
+    """Return list of detections per frame: [[{'xyxy':[x1,y1,x2,y2],'conf':0.9,'cls':20}, ...], ...]"""
+    if not load_yolo():
+        return None
+    files = sorted(Path(out_dir).glob("frame_*.png"))
+    dets_per_frame = []
+    for f in files:
+        try:
+            res = YOLO_MODEL.predict(source=str(f), imgsz=img_size, conf=conf, verbose=False)
+            r = res[0]
+            boxes = []
+            if hasattr(r, "boxes") and r.boxes is not None:
+                xyxy = r.boxes.xyxy.cpu().numpy()
+                cls = r.boxes.cls.cpu().numpy()
+                confs = r.boxes.conf.cpu().numpy()
+                for bb, cc, cf in zip(xyxy, cls, confs):
+                    if YOLO_ELE_IDS is None or int(cc) in YOLO_ELE_IDS:
+                        x1,y1,x2,y2 = [float(v) for v in bb]
+                        boxes.append({"xyxy":[x1,y1,x2,y2], "conf": float(cf), "cls": int(cc)})
+            dets_per_frame.append(boxes)
+        except Exception as e:
+            log.warning("YOLO predict failed: %s", e)
+            dets_per_frame.append([])
+    return dets_per_frame
+
+def iou(a, b):
+    ax1,ay1,ax2,ay2 = a; bx1,by1,bx2,by2 = b
+    ix1, iy1 = max(ax1,bx1), max(ay1,by1)
+    ix2, iy2 = min(ax2,bx2), min(ay2,by2)
+    w, h = max(0.0, ix2-ix1), max(0.0, iy2-iy1)
+    inter = w*h
+    if inter <= 0: return 0.0
+    areaA = (ax2-ax1)*(ay2-ay1); areaB = (bx2-bx1)*(by2-by1)
+    return inter / max(1e-6, (areaA + areaB - inter))
+
+def track_iou(dets_per_frame: List[List[Dict[str,Any]]], iou_thr: float = 0.3):
+    """Very light tracker: assign stable IDs by IoU."""
+    tracks_per_frame = []
+    next_id = 0
+    prev = []
+    for dets in dets_per_frame:
+        assigned = [-1]*len(dets)
+        used = set()
+        for pt in prev:
+            best_i, best = -1, 0.0
+            for i, d in enumerate(dets):
+                if i in used: continue
+                score = iou(pt["xyxy"], d["xyxy"])
+                if score > best:
+                    best, best_i = score, i
+            if best >= iou_thr and best_i >= 0:
+                assigned[best_i] = pt["id"]; used.add(best_i)
+        for i in range(len(dets)):
+            if assigned[i] == -1:
+                assigned[i] = next_id; next_id += 1
+        cur = [{"id": assigned[i], "xyxy": dets[i]["xyxy"], "conf": dets[i].get("conf",0.0)} for i in range(len(dets))]
+        tracks_per_frame.append(cur)
+        prev = cur
+    return tracks_per_frame
+
+def interactions_from_tracks(tracks_per_frame: List[List[Dict[str,Any]]], fps: float = 2.0) -> List[Dict[str,Any]]:
+    """Heuristics:
+       - Close-contact trunk greeting: two elephants with centers closer than ~0.6*avg width for >=1.5s.
+       - Ear-spread threat: width/height rises above running baseline and >1.2 absolute for >=1s.
+    """
+    events: List[Dict[str,Any]] = []
+    if not tracks_per_frame:
+        return events
+
+    # Ear-spread detector per track
+    ear_state: Dict[int, Tuple[float,int]] = {}  # id -> (ema_ratio, count)
+    ear_run: Dict[int, int] = {}
+
+    # Pairwise proximity persistence
+    close_run: Dict[Tuple[int,int], int] = {}
+
+    for t, cur in enumerate(tracks_per_frame):
+        # Ear-spread per elephant
+        for tr in cur:
+            x1,y1,x2,y2 = tr["xyxy"]; w = max(1.0, x2-x1); h = max(1.0, y2-y1)
+            ratio = w/h
+            base, cnt = ear_state.get(tr["id"], (ratio, 1))
+            base = 0.9*base + 0.1*ratio
+            ear_state[tr["id"]] = (base, cnt+1)
+            if ratio > base*1.25 and ratio > 1.2:
+                ear_run[tr["id"]] = ear_run.get(tr["id"], 0) + 1
+            else:
+                if ear_run.get(tr["id"],0) >= int(1.0*fps):
+                    t_event = int(max(0, t - ear_run[tr["id"]]/2)/fps)
+                    events.append({"t": int(t - ear_run[tr["id"]]/2), "type": "ear spread (threat display)", "detail": f"ratio≈{ratio:.2f}"})
+                ear_run[tr["id"]] = 0
+
+        # Pairwise close-contact
+        for i in range(len(cur)):
+            for j in range(i+1, len(cur)):
+                a, b = cur[i], cur[j]
+                ax = 0.5*(a["xyxy"][0]+a["xyxy"][2]); ay = 0.5*(a["xyxy"][1]+a["xyxy"][3])
+                bx = 0.5*(b["xyxy"][0]+b["xyxy"][2]); by = 0.5*(b["xyxy"][1]+b["xyxy"][3])
+                avg_w = 0.5*((a["xyxy"][2]-a["xyxy"][0]) + (b["xyxy"][2]-b["xyxy"][0]))
+                dist = math.hypot(ax-bx, ay-by)
+                key = tuple(sorted((a["id"], b["id"])))
+                if dist < 0.6*avg_w:
+                    close_run[key] = close_run.get(key, 0) + 1
+                    if close_run[key] == int(1.5*fps):
+                        events.append({
+                            "t": int(t - close_run[key]/2),
+                            "type": "close-contact trunk greeting (possible twining / trunk-to-mouth)",
+                            "detail": "sustained head-to-head proximity"
+                        })
+                else:
+                    close_run[key] = 0
+
+    # Dedup near-duplicates
+    events.sort(key=lambda e: (e["type"], e["t"] if e["t"] is not None else 0))
+    merged: List[Dict[str,Any]] = []
+    for e in events:
+        if merged and merged[-1]["type"] == e["type"] and abs((merged[-1]["t"] or 0) - (e["t"] or 0)) <= 1:
+            continue
+        merged.append(e)
+    return merged
+
+# ---------- Fusion, summary ----------
 def fuse_audio_motion(segments: List[Dict[str, Any]], motion: Dict[str, Any]) -> List[Dict[str, Any]]:
     if not segments: return segments
     series = motion.get("series") or []; events = motion.get("events") or []
@@ -378,26 +521,16 @@ def fuse_audio_motion(segments: List[Dict[str, Any]], motion: Dict[str, Any]) ->
         mid = int((s["start"] + s["end"]) / 2.0)
         mv_val = float(arr[min(mid, len(arr)-1)])
         level = "low" if mv_val < med*0.8 else ("medium" if mv_val < q75*1.1 else "high")
-        notes = [ev["type"] for ev in events if ev["t"] is not None and abs(ev["t"] - mid) <= 1]
+        notes = [ev["type"] for ev in events if ev.get("t") is not None and abs(ev["t"] - mid) <= 1]
         s["movement"] = {"level": level, "value": mv_val, "notes": notes}
-        # fusion
-        boost = 0.0
-        L = s["label"]
+        # modest fusion nudges
+        L = s["label"]; boost = 0.0
         if "trumpet" in L or "roar" in L: boost = 0.1 if level != "low" else -0.05
         elif "rumble" in L: boost = 0.07 if level in ("low","medium") else 0.02
-        elif "resting" in L: boost = 0.1 if level == "low" else -0.1
+        elif "resting" in L: boost = 0.10 if level == "low" else -0.10
         s["confidence"] = float(max(0.0, min(0.99, s["confidence"] + boost)))
-        # activity phrasing
-        if "trumpet" in L and level == "high":
-            s["label"] = "alarm/excitement (trumpet)"
-        if "roar" in L and level != "low":
-            s["label"] = "threat/defensive (roar)"
-
-    # If optical-flow added coherent movement, modestly support let's-go
-    if any(ev.get("type","").startswith("coherent movement") for ev in events):
-        for s in segments:
-            if "let’s‑go" in s["label"]:
-                s["confidence"] = float(min(0.99, s["confidence"] + 0.1))
+        if "trumpet" in L and level == "high": s["label"] = "alarm/excitement (trumpet)"
+        if "roar" in L and level != "low": s["label"] = "threat/defensive (roar)"
     return segments
 
 def summarize(segments: List[Dict[str, Any]], motion_events: List[Dict[str, Any]], findings: List[str]):
@@ -427,14 +560,20 @@ def summarize(segments: List[Dict[str, Any]], motion_events: List[Dict[str, Any]
     else:
         msg = "General calling—tonal activity without specialized cues."
 
-    notes = [ev["type"] for ev in motion_events if ev["t"] is not None][:2]
+    # Append salient motion/interaction notes (max 2)
+    notes = [ev["type"] for ev in motion_events if ev.get("t") is not None][:2]
     if notes: msg += f" Motion notes: {', '.join(notes)}."
     if findings:
         msg += f" Extra cues: {', '.join(findings[:2])}."
     return msg, conf
 
+# ---------- Core analysis ----------
 def analyze_media_file(path: Path, include_motion: bool) -> Dict[str, Any]:
-    diagnostics = {"ffmpeg": has_ffmpeg(), "numpy": bool(np is not None), "pillow": bool(Image is not None), "opencv": bool(cv2 is not None)}
+    diagnostics = {
+        "ffmpeg": has_ffmpeg(), "numpy": bool(np is not None),
+        "pillow": bool(Image is not None), "opencv": bool(cv2 is not None),
+        "yolo": False
+    }
 
     wav_tmp = UPLOAD_DIR / f"conv_{uuid.uuid4().hex}.wav"
     audio_ok = False; motion = {"series": [], "events": []}
@@ -468,21 +607,29 @@ def analyze_media_file(path: Path, include_motion: bool) -> Dict[str, Any]:
             }]
             duration = 5.0
 
+        # Video motion + interactions
         if include_motion and diagnostics["ffmpeg"]:
-            if extract_frames(path, FRAME_DIR, fps=2.0, width=224):
+            if extract_frames(path, FRAME_DIR, fps=2.0, width=256):
                 series = motion_series(FRAME_DIR)
                 motion = detect_motion(series, fps=2.0)
                 oflow = optical_flow_series(FRAME_DIR, fps=2.0)
                 if oflow:
                     motion["oflow"] = {"mean_mag": oflow.get("mag", []), "coherence": oflow.get("coh", [])}
                     motion["events"].extend(oflow.get("events", []))
+                # Interactions via YOLO (optional)
+                dets = yolo_detect_frames(FRAME_DIR)
+                if dets is not None:
+                    diagnostics["yolo"] = True
+                    tracks = track_iou(dets)
+                    inter = interactions_from_tracks(tracks, fps=2.0)
+                    motion["events"].extend(inter)
 
         segments = fuse_audio_motion(segments, motion)
         summary_text, overall_conf = summarize(segments, motion.get("events", []), findings)
 
         return {
             "file": path.name,
-            "species": {"label": "African elephant (heuristic)", "confidence": 0.85},
+            "species": {"label": "African elephant (heuristic)", "confidence": 0.86},
             "segments": segments,
             "summary": summary_text,
             "overall_confidence": float(min(0.99, overall_conf)),
@@ -500,10 +647,10 @@ def analyze_media_file(path: Path, include_motion: bool) -> Dict[str, Any]:
             try: os.remove(f)
             except Exception: pass
 
-# ---------- API: health/config ----------
+# ---------- API ----------
 @app.get("/health")
 def health():
-    return {"status": "ok", "api": "large-file+heuristics+video"}
+    return {"status": "ok", "api": "large-file+heuristics+video+interact"}
 
 @app.get("/config")
 def config():
@@ -513,7 +660,6 @@ def config():
         "chunk_mb": CHUNK_MB
     }
 
-# ---------- API: small file (direct) ----------
 @app.post("/analyze")
 async def analyze(file: UploadFile = File(...), include_motion: bool = True):
     ext = Path(file.filename).suffix.lower()
@@ -539,7 +685,6 @@ async def analyze(file: UploadFile = File(...), include_motion: bool = True):
     finally:
         tmp.unlink(missing_ok=True)
 
-# ---------- API: chunked upload (large files) ----------
 @app.post("/upload/init")
 async def upload_init(req: Request):
     try:
