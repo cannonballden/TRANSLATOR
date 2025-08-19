@@ -1,9 +1,9 @@
-# mini_api.py — enhanced FastAPI backend with chunked uploads + richer heuristics
-# - Large files via /upload/* (chunked) + small files via /analyze
-# - Audio features: centroid, bands, rolloff, flatness, flux, tonality, peak, centroid slope
-# - Motion cues via ffmpeg frame diffs (optional)
-# - Conservative interpretations + clear uncertainty
-# - Graceful fallbacks if numpy/Pillow/ffmpeg aren't available
+# mini_api.py — large-file + richer heuristics + optional optical-flow motion
+# - Small files: /analyze (direct)
+# - Large files: /upload/init, /upload/part, /upload/finish (chunked)
+# - Audio: centroid, bands, flatness, rolloff, flux, tonality, peak, centroid slope
+# - Motion: frame-diff series (always if ffmpeg+pillow+numpy), optional optical flow if opencv-python available
+# - Conservative outputs with clear uncertainty; robust fallbacks
 
 import os, json, shutil, subprocess, uuid, logging, wave, contextlib, glob
 from pathlib import Path
@@ -11,7 +11,7 @@ from typing import List, Dict, Any, Tuple, Optional
 
 from fastapi import FastAPI, UploadFile, File, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse
 
 # Optional deps (graceful degradation)
 try:
@@ -22,15 +22,19 @@ try:
     from PIL import Image
 except Exception:
     Image = None
+try:
+    import cv2
+except Exception:
+    cv2 = None  # optical flow is optional
 
 log = logging.getLogger("mini_api")
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
 # ---------- Config ----------
 PAGES_ORIGIN = os.getenv("PAGES_ORIGIN", "https://cannonballden.github.io")
-SMALL_UPLOAD_MAX_MB = int(os.getenv("SMALL_UPLOAD_MAX_MB", "25"))  # direct /analyze limit
-MAX_MB = int(os.getenv("MAX_MB", "512"))  # absolute upper bound (chunked or not)
-CHUNK_MB = int(os.getenv("CHUNK_MB", "5"))  # chunk size announced by /upload/init
+SMALL_UPLOAD_MAX_MB = int(os.getenv("SMALL_UPLOAD_MAX_MB", "50"))  # direct /analyze limit (was 25)
+MAX_MB = int(os.getenv("MAX_MB", "1024"))                          # absolute hard cap for chunked
+CHUNK_MB = int(os.getenv("CHUNK_MB", "5"))
 CHUNK_BYTES = CHUNK_MB * 1024 * 1024
 
 SUPPORTED_VIDEO = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".ogv"}
@@ -38,16 +42,16 @@ SUPPORTED_AUDIO = {".mp3", ".wav", ".ogg", ".oga", ".flac"}
 
 BASE_DIR = Path(__file__).resolve().parent
 UPLOAD_DIR = BASE_DIR / "uploads_tmp"
-SESS_DIR = UPLOAD_DIR / "sessions"         # for chunked uploads
-FRAME_DIR = BASE_DIR / "frames_tmp"        # for motion analysis
+SESS_DIR = UPLOAD_DIR / "sessions"
+FRAME_DIR = BASE_DIR / "frames_tmp"
 for d in (UPLOAD_DIR, SESS_DIR, FRAME_DIR):
     d.mkdir(exist_ok=True, parents=True)
 
 # ---------- App ----------
-app = FastAPI(title="Elephant Translator — API (large-file + heuristics)")
+app = FastAPI(title="Elephant Translator — API (large-file + video)")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[PAGES_ORIGIN],  # origin = scheme+host (no path)
+    allow_origins=[PAGES_ORIGIN],  # scheme+host (no path)
     allow_methods=["*"],
     allow_headers=["*"],
     allow_credentials=False,
@@ -67,8 +71,7 @@ def _run(cmd: List[str]) -> Tuple[bool, str]:
 def convert_to_wav(src: Path, dst: Path, sr: int = 16000) -> bool:
     if not has_ffmpeg():
         return False
-    cmd = ["ffmpeg", "-y", "-i", str(src), "-ac", "1", "-ar", str(sr), "-vn", str(dst)]
-    ok, out = _run(cmd)
+    ok, out = _run(["ffmpeg","-y","-i",str(src),"-ac","1","-ar",str(sr),"-vn",str(dst)])
     if not ok:
         log.warning("ffmpeg failed: %s", out)
     return ok
@@ -91,7 +94,7 @@ def load_wav_pcm16(path: Path) -> Tuple[Optional["np.ndarray"], int]:
         x = x.reshape(-1, n_channels).mean(axis=1)
     return x, sr
 
-def frame_audio(x: "np.ndarray", sr: int, win_s: float = 0.5, hop_s: float = 0.25):
+def frame_audio(x: "np.ndarray", sr: int, win_s: float = 0.6, hop_s: float = 0.3):
     win = max(1, int(sr * win_s)); hop = max(1, int(sr * hop_s))
     idx = []; start = 0
     while start + win <= len(x):
@@ -148,7 +151,7 @@ def spectral_features(frame: "np.ndarray", sr: int, prev_mag: Optional["np.ndarr
     return feat, mag
 
 def classify_audio(x: "np.ndarray", sr: int):
-    """Return (segments, duration, findings) where findings are global notes (e.g., antiphony)."""
+    """Return (segments, duration, findings) — findings are global notes (e.g., antiphony)."""
     idx = frame_audio(x, sr, win_s=0.6, hop_s=0.3)
     feats = []; prev_mag = None
     for (s, e) in idx:
@@ -166,9 +169,8 @@ def classify_audio(x: "np.ndarray", sr: int):
         slope[1:-1] = (cent[2:] - cent[:-2]) / 2.0
     dur = len(x) / sr
 
-    # Label each frame
     labels = []
-    tonal_marks = []  # (t, peak_freq) for name-like / antiphonal checks
+    tonal_marks = []  # (t, peak_freq)
     for i, (samp, (s0, s1)) in enumerate(zip(feats, idx)):
         start_t = s0 / sr; end_t = s1 / sr
         label, conf, reasons = "calling", 0.55, []
@@ -232,7 +234,6 @@ def classify_audio(x: "np.ndarray", sr: int):
             ) or (
                 ("trumpet" in b["label"] or "roar" in b["label"]) and ("rumble" in a["label"])
             )
-            # rough overlap window
             if chorus_pair and min(a["end"], b["end"]) - max(a["start"], b["start"]) > -1.0:
                 a["label"] = "greeting chorus (family reunion)"
                 b["label"] = "greeting chorus (family reunion)"
@@ -240,7 +241,7 @@ def classify_audio(x: "np.ndarray", sr: int):
 
     findings = []
 
-    # Possible antiphonal exchange: two contact/let’s-go segments with ~1–5s gap
+    # Possible antiphonal exchange: two rumble-like segments with ~1–5s gap
     last_end = None
     last_is_rumble = False
     for s in merged:
@@ -284,6 +285,44 @@ def motion_series(out_dir: Path) -> List[float]:
         vals.append(float(np.mean(np.abs(cur - prev)) / 255.0))
         prev = cur
     return vals
+
+def optical_flow_series(out_dir: Path, fps: float = 2.0) -> Dict[str, Any]:
+    """Return mean magnitude per step + coherence and events (requires cv2 + numpy)."""
+    if cv2 is None or np is None: return {}
+    files = sorted(Path(out_dir).glob("frame_*.png"))
+    if len(files) < 2: return {}
+    mags = []; coh = []
+    events = []
+    mean_vecs = []  # (vx, vy) per step
+    prev = cv2.imread(str(files[0]), cv2.IMREAD_GRAYSCALE)
+    for f in files[1:]:
+        cur = cv2.imread(str(f), cv2.IMREAD_GRAYSCALE)
+        flow = cv2.calcOpticalFlowFarneback(prev, cur, None, 0.5, 1, 15, 3, 5, 1.1, 0)
+        vx = flow[...,0]; vy = flow[...,1]
+        mag = np.sqrt(vx*vx + vy*vy)
+        mags.append(float(np.mean(mag)))
+        mvx = float(np.mean(vx)); mvy = float(np.mean(vy))
+        mean_vecs.append((mvx, mvy))
+        denom = float(np.mean(mag) + 1e-6)
+        coh.append(float((np.hypot(mvx, mvy)) / denom))
+        prev = cur
+
+    arr = np.array(mags, dtype=np.float32)
+    if len(arr) > 4:
+        med = float(np.median(arr)); std = float(np.std(arr))
+        # coherent movement when magnitude is high and coherence > 0.5 for ≥ 1s
+        run = 0
+        for i, (m, c) in enumerate(zip(mags, coh)):
+            if m > med + 1.0*std and c > 0.5: run += 1
+            else:
+                if run >= int(1*fps):
+                    t = int((i - run/2)/fps)
+                    events.append({"t": t, "type": "coherent movement (group moving)", "detail": f"~{run/fps:.1f}s"})
+                run = 0
+        if run >= int(1*fps):
+            t = int((len(mags) - run/2)/fps)
+            events.append({"t": t, "type": "coherent movement (group moving)", "detail": f"~{run/fps:.1f}s"})
+    return {"mag": mags, "coh": coh, "events": events}
 
 def detect_motion(vals: List[float], fps: float = 2.0) -> Dict[str, Any]:
     out = {"series": vals, "events": []}
@@ -341,13 +380,24 @@ def fuse_audio_motion(segments: List[Dict[str, Any]], motion: Dict[str, Any]) ->
         level = "low" if mv_val < med*0.8 else ("medium" if mv_val < q75*1.1 else "high")
         notes = [ev["type"] for ev in events if ev["t"] is not None and abs(ev["t"] - mid) <= 1]
         s["movement"] = {"level": level, "value": mv_val, "notes": notes}
-        # modest fusion
+        # fusion
         boost = 0.0
         L = s["label"]
         if "trumpet" in L or "roar" in L: boost = 0.1 if level != "low" else -0.05
-        elif "rumble" in L: boost = 0.05 if level in ("low","medium") else 0.0
+        elif "rumble" in L: boost = 0.07 if level in ("low","medium") else 0.02
         elif "resting" in L: boost = 0.1 if level == "low" else -0.1
         s["confidence"] = float(max(0.0, min(0.99, s["confidence"] + boost)))
+        # activity phrasing
+        if "trumpet" in L and level == "high":
+            s["label"] = "alarm/excitement (trumpet)"
+        if "roar" in L and level != "low":
+            s["label"] = "threat/defensive (roar)"
+
+    # If optical-flow added coherent movement, modestly support let's-go
+    if any(ev.get("type","").startswith("coherent movement") for ev in events):
+        for s in segments:
+            if "let’s‑go" in s["label"]:
+                s["confidence"] = float(min(0.99, s["confidence"] + 0.1))
     return segments
 
 def summarize(segments: List[Dict[str, Any]], motion_events: List[Dict[str, Any]], findings: List[str]):
@@ -384,7 +434,7 @@ def summarize(segments: List[Dict[str, Any]], motion_events: List[Dict[str, Any]
     return msg, conf
 
 def analyze_media_file(path: Path, include_motion: bool) -> Dict[str, Any]:
-    diagnostics = {"ffmpeg": has_ffmpeg(), "numpy": bool(np is not None), "pillow": bool(Image is not None)}
+    diagnostics = {"ffmpeg": has_ffmpeg(), "numpy": bool(np is not None), "pillow": bool(Image is not None), "opencv": bool(cv2 is not None)}
 
     wav_tmp = UPLOAD_DIR / f"conv_{uuid.uuid4().hex}.wav"
     audio_ok = False; motion = {"series": [], "events": []}
@@ -422,19 +472,25 @@ def analyze_media_file(path: Path, include_motion: bool) -> Dict[str, Any]:
             if extract_frames(path, FRAME_DIR, fps=2.0, width=224):
                 series = motion_series(FRAME_DIR)
                 motion = detect_motion(series, fps=2.0)
+                oflow = optical_flow_series(FRAME_DIR, fps=2.0)
+                if oflow:
+                    motion["oflow"] = {"mean_mag": oflow.get("mag", []), "coherence": oflow.get("coh", [])}
+                    motion["events"].extend(oflow.get("events", []))
 
         segments = fuse_audio_motion(segments, motion)
         summary_text, overall_conf = summarize(segments, motion.get("events", []), findings)
 
         return {
             "file": path.name,
-            "species": {"label": "African elephant (heuristic)", "confidence": 0.84},
+            "species": {"label": "African elephant (heuristic)", "confidence": 0.85},
             "segments": segments,
             "summary": summary_text,
             "overall_confidence": float(min(0.99, overall_conf)),
             "diagnostics": diagnostics,
             "duration": duration,
-            "findings": findings
+            "findings": findings,
+            "motion_events": motion.get("events", []),
+            "motion_series_len": len(motion.get("series", [])),
         }
     finally:
         if wav_tmp != path:
@@ -447,7 +503,7 @@ def analyze_media_file(path: Path, include_motion: bool) -> Dict[str, Any]:
 # ---------- API: health/config ----------
 @app.get("/health")
 def health():
-    return {"status": "ok", "api": "large-file+heuristics"}
+    return {"status": "ok", "api": "large-file+heuristics+video"}
 
 @app.get("/config")
 def config():
@@ -463,7 +519,6 @@ async def analyze(file: UploadFile = File(...), include_motion: bool = True):
     ext = Path(file.filename).suffix.lower()
     if ext not in SUPPORTED_VIDEO.union(SUPPORTED_AUDIO):
         return JSONResponse(status_code=400, content={"error": f"Unsupported type {ext}"})
-    # size guard for direct route (browser may still send large)
     tmp = UPLOAD_DIR / f"direct_{uuid.uuid4().hex}{ext}"
     size = 0
     with tmp.open("wb") as out:
@@ -485,7 +540,6 @@ async def analyze(file: UploadFile = File(...), include_motion: bool = True):
         tmp.unlink(missing_ok=True)
 
 # ---------- API: chunked upload (large files) ----------
-# layout: sessions/{upload_id}/parts/part_00000.bin + meta.json
 @app.post("/upload/init")
 async def upload_init(req: Request):
     try:
@@ -514,14 +568,12 @@ async def upload_part(request: Request, upload_id: str, index: int):
     meta_p = sess / "meta.json"
     if not meta_p.exists():
         return JSONResponse(status_code=404, content={"error":"upload session not found"})
-    # read raw body
     data = await request.body()
     if not data:
         return JSONResponse(status_code=400, content={"error":"empty chunk"})
     part_path = parts / f"part_{index:05d}.bin"
     with part_path.open("wb") as f:
         f.write(data)
-    # update meta
     meta = json.loads(meta_p.read_text())
     meta["received"][str(index)] = len(data)
     meta_p.write_text(json.dumps(meta))
@@ -536,21 +588,17 @@ async def upload_finish(upload_id: str, include_motion: bool = True, total_chunk
         return JSONResponse(status_code=404, content={"error":"upload session not found"})
     meta = json.loads(meta_p.read_text())
     filename = meta["filename"]; ext = meta["ext"]
-    # verify parts
     if total_chunks <= 0:
-        # try to infer
         total_chunks = len(list(parts.glob("part_*.bin")))
     for i in range(total_chunks):
         if not (parts / f"part_{i:05d}.bin").exists():
             return JSONResponse(status_code=400, content={"error": f"missing chunk {i}"})
-    # assemble
     final_path = UPLOAD_DIR / f"chunked_{upload_id}{ext}"
     with final_path.open("wb") as out:
         for i in range(total_chunks):
             p = parts / f"part_{i:05d}.bin"
             with p.open("rb") as f:
                 shutil.copyfileobj(f, out)
-    # analyze
     try:
         res = analyze_media_file(final_path, include_motion=include_motion)
         return JSONResponse(content=res)
@@ -558,7 +606,6 @@ async def upload_finish(upload_id: str, include_motion: bool = True, total_chunk
         log.exception("Analysis failed")
         return JSONResponse(status_code=500, content={"error": f"Analysis failed: {e}"})
     finally:
-        # cleanup
         try: final_path.unlink(missing_ok=True)
         except Exception: pass
         for f in parts.glob("part_*.bin"):
