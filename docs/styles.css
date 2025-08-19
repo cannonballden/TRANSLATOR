@@ -1,8 +1,8 @@
 :root{
   --bg:#0e1116; --panel:#151926; --ink:#e7e9ef;
   --muted:#a7adbb; --line:#22283a;
-  --accent:#59b7ff; --ok:#38c172; --warn:#ffb02e; --bad:#ff6262;
-  --rumble:#48d6a3; --trumpet:#ff7080; --roar:#ffc857; --rest:#98a1b3; --chorus:#9f7aea;
+  --ok:#38c172; --bad:#ff6262;
+  --rumble:#48d6a3; --trumpet:#ff7080; --roar:#ffc857; --rest:#98a1b3; --chorus:#9f7aea; --other:#728096;
 }
 *{box-sizing:border-box}
 html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);font-family:system-ui,-apple-system,Segoe UI,Roboto,Inter,Arial,sans-serif;line-height:1.45}
@@ -29,7 +29,10 @@ h2{margin:0 0 10px}
 .muted{color:var(--muted)}
 .small{font-size:13px}
 .hidden{display:none}
-progress{height:8px;width:220px}
+progress{height:8px;width:240px}
+
+.player{margin:12px 0}
+.media{width:100%;max-height:360px;background:#000;border:1px solid #1f2333;border-radius:8px}
 
 .legend{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
 .swatch{padding:4px 8px;border-radius:999px;border:1px solid var(--line);font-size:12px}
@@ -38,12 +41,13 @@ progress{height:8px;width:220px}
 .swatch.roar{background:linear-gradient(90deg,#ffd47a,#ffc857)}
 .swatch.resting{background:linear-gradient(90deg,#b7beca,#98a1b3)}
 .swatch.chorus{background:linear-gradient(90deg,#b59cff,#9f7aea)}
+.swatch.other{background:linear-gradient(90deg,#90a0b7,#728096)}
 
 .filter-row{display:flex;gap:16px;flex-wrap:wrap;margin:6px 0 10px}
 .summary{padding:12px;border:1px dashed #2e3448;border-radius:10px;background:#111522;margin:8px 0}
 .diag{color:#cfd3df;font-size:12px;margin-top:6px}
 
-#timeline{position:relative;height:20px;background:#0c1018;border:1px solid #242b3f;border-radius:8px;overflow:hidden;margin:10px 0}
+#timeline{position:relative;height:24px;background:#0c1018;border:1px solid #242b3f;border-radius:8px;overflow:hidden;margin:10px 0;cursor:pointer}
 .seg{position:absolute;top:0;bottom:0}
 .seg.trumpet{background:linear-gradient(90deg,#ff8895,#ff7080)}
 .seg.rumble{background:linear-gradient(90deg,#48d6a3,#22b485)}
@@ -51,6 +55,14 @@ progress{height:8px;width:220px}
 .seg.resting{background:linear-gradient(90deg,#b7beca,#98a1b3)}
 .seg.chorus{background:linear-gradient(90deg,#b59cff,#9f7aea)}
 .seg.other{background:repeating-linear-gradient(45deg,#445,#445 8px,#222 8px,#222 16px)}
+
+#markers{position:relative;height:0}
+.marker{position:absolute;top:-4px;width:2px;height:28px;background:#aaa;opacity:.9}
+.marker.freeze{background:#75c1ff}
+.marker.stomp{background:#ff6262}
+.marker.ear{background:#9f7aea}
+.marker.coherent{background:#38c172}
+.marker.excite{background:#ffd47a}
 
 .row{display:flex;gap:12px;align-items:flex-start;border-top:1px solid #24283a;padding:12px 0}
 .row:first-child{border-top:0}
