@@ -19,45 +19,57 @@
     <h2>1) Connect to your server</h2>
     <div class="server-row">
       <span class="dot" id="dot"></span>
-      <input id="serverUrl" type="url" placeholder="https://9010-…githubpreview.dev (no trailing slash)" />
+      <input id="serverUrl" type="url" placeholder="https://9040-…githubpreview.dev (no trailing slash)" />
       <button id="saveServer">Save</button>
       <button id="checkHealth">Health</button>
     </div>
-    <p class="muted small">Paste the <b>Public</b> URL from the <b>Ports</b> panel (port 9010). Click Health to verify connection.</p>
+    <p class="muted small">Paste the <b>Public</b> URL from the <b>Ports</b> panel (port 9010/9020/9030/9040). Click Health to verify.</p>
+    <div id="configLine" class="muted small"></div>
   </section>
 
   <section class="panel">
-    <h2>2) Upload media</h2>
+    <h2>2) Upload and preview</h2>
     <div id="drop" class="drop">
       <input id="fileInput" type="file" accept="audio/*,video/*" />
-      <p>Drag & drop a short audio/video clip here (≤ 10–15 MB), or use the file picker.</p>
+      <p>Drag & drop a clip here (WAV/MP3/MP4/WebM…). Short clips (5–20s) are best to start.</p>
     </div>
+
+    <div id="playerWrap" class="player hidden">
+      <video id="player" class="media" controls></video>
+      <audio id="audioPlayer" class="media" controls></audio>
+    </div>
+
     <div class="actions">
+      <label class="small"><input type="checkbox" id="motionToggle" checked /> Analyze motion (video)</label>
       <button id="analyzeBtn">Analyze</button>
       <button id="downloadBtn" disabled>Download JSON</button>
       <span id="status" class="muted"></span>
       <progress id="prog" value="0" max="100" class="hidden"></progress>
     </div>
+
     <details class="tips">
       <summary>Tips for best results</summary>
       <ul>
-        <li>Short clips (5–20s). Start small to avoid proxy limits.</li>
-        <li><b>ffmpeg</b> in Codespaces enables more formats + motion analysis.</li>
-        <li>Minimize wind and crowd noise; keep the subject visible.</li>
-        <li>Outputs are <b>heuristic</b> — treat them as hints, not facts.</li>
+        <li>Short clips (5–20s). Use large-file mode (auto) for longer uploads.</li>
+        <li><b>ffmpeg</b> enables more formats + motion analysis; <b>opencv-python</b> improves motion (optical flow).</li>
+        <li>Reduce wind and crowd noise; keep the subject visible.</li>
+        <li>Interpretations are <b>heuristic</b> — guidance, not guarantees.</li>
       </ul>
     </details>
   </section>
 
   <section id="filters" class="panel hidden">
-    <h2>3) View</h2>
+    <h2>3) Results</h2>
+
     <div class="legend">
       <span class="swatch trumpet">Trumpet</span>
       <span class="swatch rumble">Rumble</span>
       <span class="swatch roar">Roar</span>
       <span class="swatch resting">Resting</span>
       <span class="swatch chorus">Greeting chorus</span>
+      <span class="swatch other">Other</span>
     </div>
+
     <div class="filter-row">
       <label><input type="checkbox" data-f="trumpet" checked /> trumpet</label>
       <label><input type="checkbox" data-f="rumble" checked /> rumbles</label>
@@ -66,9 +78,13 @@
       <label><input type="checkbox" data-f="chorus" checked /> greeting</label>
       <label><input type="checkbox" data-f="other" checked /> other</label>
     </div>
+
     <div id="summary" class="summary"></div>
     <div id="diagnostics" class="diag"></div>
-    <div id="timeline"></div>
+
+    <div id="timeline" title="Click to seek"></div>
+    <div id="markers"></div>
+
     <div id="playbyplay"></div>
   </section>
 </main>
