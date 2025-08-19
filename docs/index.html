@@ -2,14 +2,14 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Elephant Translator — Demo</title>
+  <title>Elephant Translator — Demo (reset-stable v1)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
 <header>
   <div class="wrap">
-    <h1>Elephant Translator <span class="badge">prototype</span></h1>
+    <h1>Elephant Translator <span class="badge">reset‑stable v1</span></h1>
     <p class="tagline">Heuristic audio + motion + interactions (conservative, evidence-first)</p>
   </div>
 </header>
@@ -19,11 +19,11 @@
     <h2>1) Connect to your server</h2>
     <div class="server-row">
       <span class="dot" id="dot"></span>
-      <input id="serverUrl" type="url" placeholder="https://9040-…githubpreview.dev (no trailing slash)" />
+      <input id="serverUrl" type="url" placeholder="https://9200-…githubpreview.dev (no trailing slash)" />
       <button id="saveServer">Save</button>
       <button id="checkHealth">Health</button>
     </div>
-    <p class="muted small">Paste the <b>Public</b> URL from the <b>Ports</b> panel (9010/9020/9030/9040). Click Health to verify.</p>
+    <p class="muted small">Paste the <b>Public</b> URL from the Codespaces <b>Ports</b> panel (we’ll use port 9200). Click <b>Health</b> to verify.</p>
     <div id="configLine" class="muted small"></div>
   </section>
 
@@ -53,7 +53,7 @@
         <li>Short clips (5–20s). Large files switch to resumable mode automatically.</li>
         <li><b>ffmpeg</b> enables decoding; <b>opencv-python</b> adds optical flow; <b>ultralytics</b> (YOLO) improves interaction detection.</li>
         <li>Minimize wind/crowd noise; keep elephants visible.</li>
-        <li>Outputs are heuristic hints, not guarantees—treat them as **evidence-based suggestions**.</li>
+        <li>Outputs are heuristic hints, not guarantees—treat them as <b>evidence-based suggestions</b>.</li>
       </ul>
     </details>
   </section>
