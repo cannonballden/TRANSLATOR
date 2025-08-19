@@ -73,7 +73,7 @@
     const u = normUrl(serverInput.value || saved);
     if (!u) { alert('Paste your server URL first.'); return; }
     try{
-      const r = await fetch(u+'/health', {mode:'cors'});
+      const r = await fetch(u+'/health?t=now', {mode:'cors'});
       if(!r.ok) throw new Error('HTTP '+r.status);
       const j = await r.json();
       setDot('ok');
@@ -189,7 +189,7 @@
       }
     };
 
-    // play-by-play table
+    // play-by-play
     playEl.innerHTML = '';
     segs.forEach(seg=>{
       if (!fitsFilter(seg.label, filt)) return;
