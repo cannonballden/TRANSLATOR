@@ -39,11 +39,10 @@ log = logging.getLogger("mini_api")
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
 # ------------------- Config -------------------
-# Open CORS to keep the demo simple across Pages/Codespaces
-ALLOW_ORIGINS = ["*"]
+ALLOW_ORIGINS = ["*"]  # open for demo
 
-SMALL_UPLOAD_MAX_MB = int(os.getenv("SMALL_UPLOAD_MAX_MB", "50"))  # direct upload limit
-MAX_MB = int(os.getenv("MAX_MB", "1024"))                          # absolute hard cap
+SMALL_UPLOAD_MAX_MB = int(os.getenv("SMALL_UPLOAD_MAX_MB", "50"))
+MAX_MB = int(os.getenv("MAX_MB", "1024"))
 CHUNK_MB = int(os.getenv("CHUNK_MB", "5"))
 CHUNK_BYTES = CHUNK_MB * 1024 * 1024
 
@@ -61,7 +60,7 @@ for d in (UPLOAD_DIR, SESS_DIR, FRAME_DIR):
 app = FastAPI(title="Elephant Translator — reset-stable v1")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOW_ORIGINS,  # wide open for demo
+    allow_origins=ALLOW_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
     allow_credentials=False,
@@ -186,18 +185,18 @@ def classify_audio(x: "np.ndarray", sr: int):
         elif samp["rms"] > energy_med * 0.8 and samp["low_r"] > 0.33 and samp["centroid"] < 180 and samp["flatness"] < 0.5:
             label = "contact rumble"; conf = min(0.92, 0.6 + 0.5*samp["low_r"])
         elif samp["rms"] > energy_med * 0.9 and samp["low_r"] > 0.28 and slope[i] > 30 and samp["centroid"] < 260:
-            label = "let’s‑go rumble (matriarch)"; conf = min(0.9, 0.55 + 0.5*min(1.0, slope[i]/120.0))
+            label = "let’s-go rumble (matriarch)"; conf = min(0.9, 0.55 + 0.5*min(1.0, slope[i]/120.0))
         elif samp["rms"] > energy_med * 0.9 and samp["low_r"] > 0.25 and samp["flatness"] > 0.6 and samp["centroid"] < 220:
-            label = "musth‑like buzz (male)"; conf = min(0.86, 0.5 + 0.6*(samp["flatness"] - 0.6 + samp["low_r"]))
+            label = "musth-like buzz (male)"; conf = min(0.86, 0.5 + 0.6*(samp["flatness"] - 0.6 + samp["low_r"]))
         elif samp["rms"] > energy_med and samp["upper_mid_r"] > 0.28 and samp["flatness"] > 0.55:
-            label = "roar / rumble‑roar"; conf = min(0.9, 0.55 + 0.5*samp["upper_mid_r"])
+            label = "roar / rumble-roar"; conf = min(0.9, 0.55 + 0.5*samp["upper_mid_r"])
         elif 250 <= samp["centroid"] <= 600 and samp["rms"] > energy_med * 0.8 and (s1 - s0) / sr <= 0.75:
             label = "estrous rumble (female)"; conf = 0.72
         elif samp["rms"] < energy_med * 0.6:
             label = "resting / low arousal"; conf = min(0.82, 0.6 + (energy_med*0.6 - samp["rms"])*3.0)
         else:
             if samp["tonality"] > 0.22 and samp["low_r"] > 0.2 and 80 < samp["peak_freq"] < 400:
-                label = "possible individual‑address rumble (uncertain)"; conf = 0.62
+                label = "possible individual-address rumble (uncertain)"; conf = 0.62
 
         if samp["tonality"] > 0.22 and 60 < samp["peak_freq"] < 500:
             tonal_marks.append((start_t, samp["peak_freq"]))
@@ -511,8 +510,8 @@ def summarize(segments: List[Dict[str, Any]], motion_events: List[Dict[str, Any]
     conf = float(np.median([s["confidence"] for s in segments])) if np is not None else 0.7
 
     if "greeting chorus" in top: msg = "Family reunion chorus—overlapping rumbles + trumpets/roars; strong social excitement."
-    elif "let’s‑go" in top:      msg = "Likely travel initiation—rising rumble; herd may begin moving."
-    elif "musth" in top:        msg = "Musth‑like buzz (male)—status/dominance broadcast."
+    elif "let’s-go" in top:      msg = "Likely travel initiation—rising rumble; herd may begin moving."
+    elif "musth" in top:        msg = "Musth-like buzz (male)—status/dominance broadcast."
     elif "trumpet" in top:      msg = "Alarm/excitement—bright trumpet; give space."
     elif "roar" in top:         msg = "Defensive/agitated—harsh roar; keep distance."
     elif "estrous" in top:      msg = "Estrous rumble—female receptivity cue."
