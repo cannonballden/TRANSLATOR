@@ -1,10 +1,10 @@
-# mini_api.py -- reset-stable v2.1 (ascii-safe, richer audio detector)
+# mini_api.py -- reset-stable v2.2 (ascii-only, richer audio detector)
 # FastAPI backend for Elephant Translator:
 # - Small files: POST /analyze (direct)
 # - Large files: /upload/init + /upload/part + /upload/finish (chunked)
 # - Audio heuristics with adaptive thresholds + richer features
 # - Video motion (frame-diff), optional optical flow (OpenCV), optional interactions (YOLO)
-# - CORS open for GH Pages <-> Codespaces demo. ASCII-only strings to avoid Unicode source issues.
+# - CORS open for GH Pages <-> Codespaces demo. ASCII-only strings.
 
 import os, json, shutil, subprocess, uuid, logging, wave, contextlib, glob, math
 from pathlib import Path
@@ -66,7 +66,7 @@ for d in (UPLOAD_DIR, SESS_DIR, FRAME_DIR):
     d.mkdir(exist_ok=True, parents=True)
 
 # ------------------- App -------------------
-app = FastAPI(title="Elephant Translator -- reset-stable v2.1 (ascii)")
+app = FastAPI(title="Elephant Translator -- reset-stable v2.2 (ascii)")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOW_ORIGINS,
@@ -87,12 +87,14 @@ def _run(cmd: List[str]) -> Tuple[bool, str]:
         return (False, str(e))
 
 def convert_to_wav(src: Path, dst: Path, sr: int = 16000) -> bool:
-    if not has_ffmpeg(): return False
+    if not has_ffmpeg():
+        return False
     ok, out = _run(["ffmpeg","-y","-i",str(src),"-ac","1","-ar",str(sr),"-vn",str(dst)])
-    if not ok: log.warning("ffmpeg failed: %s", out)
+    if not ok:
+        log.warning("ffmpeg failed: %s", out)
     return ok
 
-def load_wav_pcm16(path: Path) -> Tuple[Optional("np.ndarray"), int]:
+def load_wav_pcm16(path: Path) -> Tuple[Optional["np.ndarray"], int]:
     with contextlib.closing(wave.open(str(path), "rb")) as wf:
         n_channels = wf.getnchannels()
         sr = wf.getframerate()
@@ -111,12 +113,14 @@ def load_wav_pcm16(path: Path) -> Tuple[Optional("np.ndarray"), int]:
     return x, sr
 
 def zcr(frame: "np.ndarray") -> float:
-    if frame.size < 2: return 0.0
+    if frame.size < 2:
+        return 0.0
     s = np.sign(frame)
     return float(np.mean((s[1:] != s[:-1]).astype(np.float32)))
 
 def butter_band_sos(low, high, sr, order=4):
-    if butter is None: return None
+    if butter is None:
+        return None
     nyq = 0.5 * sr
     low = max(1.0, low) / nyq
     high = min(high/nyq, 0.999)
@@ -129,7 +133,8 @@ def band_rms_fft(frame: "np.ndarray", sr: int, band: Tuple[float,float]) -> floa
     freqs = np.fft.rfftfreq(len(frame), 1.0/sr)
     lo, hi = band
     sel = (freqs >= lo) & (freqs < hi)
-    if not np.any(sel): return 0.0
+    if not np.any(sel):
+        return 0.0
     power = float(np.mean((mag[sel])**2))
     return float(np.sqrt(power + 1e-12))
 
@@ -141,7 +146,7 @@ def band_rms(frame: "np.ndarray", sr: int, band: Tuple[float,float]) -> float:
             return float(np.sqrt(np.mean(y*y) + 1e-12))
     return band_rms_fft(frame, sr, band)
 
-def spectral_stats(frame: "np.ndarray", sr: int, prev_mag: Optional("np.ndarray")):
+def spectral_stats(frame: "np.ndarray", sr: int, prev_mag: Optional["np.ndarray"]):
     win = np.hamming(len(frame))
     f = np.fft.rfft(frame * win)
     mag = np.abs(f) + 1e-12
@@ -185,7 +190,8 @@ def frame_audio(x: "np.ndarray", sr: int, win_s: float = 0.5, hop_s: float = 0.2
     idx = []; start = 0
     while start + win <= len(x):
         idx.append((start, start + win)); start += hop
-    if not idx and len(x) > 0: idx.append((0, len(x)))
+    if not idx and len(x) > 0:
+        idx.append((0, len(x)))
     return idx
 
 def classify_audio_adaptive(x: "np.ndarray", sr: int):
@@ -210,7 +216,6 @@ def classify_audio_adaptive(x: "np.ndarray", sr: int):
         return [], 0.0, []
 
     rms_med = float(np.median(rms_list))
-    rms_p90 = float(np.quantile(rms_list, 0.90))
     noise_floor = float(np.median(sorted(rms_list)[:max(1, len(rms_list)//5)]))
     def snr_db(r): return 20.0 * math.log10((r + 1e-9) / (noise_floor + 1e-9))
 
@@ -282,7 +287,8 @@ def classify_audio_adaptive(x: "np.ndarray", sr: int):
     for i in range(len(merged)):
         for j in range(i+1, len(merged)):
             a, b = merged[i], merged[j]
-            if b["start"] > a["end"] + 2.0: break
+            if b["start"] > a["end"] + 2.0:
+                break
             pair = (
                 ("trumpet" in a["label"] or "roar" in a["label"]) and ("rumble" in b["label"])
             ) or (
@@ -316,18 +322,22 @@ def classify_audio_adaptive(x: "np.ndarray", sr: int):
 
 # -------- Video extraction & motion --------
 def extract_frames(path: Path, out_dir: Path, fps: float = 2.0, width: int = 256) -> bool:
-    if not has_ffmpeg(): return False
+    if not has_ffmpeg():
+        return False
     for f in glob.glob(str(out_dir / "frame_*.png")):
         try: os.remove(f)
         except Exception: pass
     ok, out = _run(["ffmpeg","-y","-i",str(path),"-vf",f"fps={fps},scale={width}:-1",str(out_dir/"frame_%05d.png")])
-    if not ok: log.warning("ffmpeg frames failed: %s", out)
+    if not ok:
+        log.warning("ffmpeg frames failed: %s", out)
     return ok
 
 def motion_series(out_dir: Path) -> List[float]:
-    if Image is None or np is None: return []
+    if Image is None or np is None:
+        return []
     files = sorted(Path(out_dir).glob("frame_*.png"))
-    if len(files) < 2: return []
+    if len(files) < 2:
+        return []
     vals = []
     prev = np.array(Image.open(files[0]).convert("L"), dtype=np.float32)
     for f in files[1:]:
@@ -337,9 +347,11 @@ def motion_series(out_dir: Path) -> List[float]:
     return vals
 
 def optical_flow_series(out_dir: Path, fps: float = 2.0) -> Dict[str, Any]:
-    if cv2 is None or np is None: return {}
+    if cv2 is None or np is None:
+        return {}
     files = sorted(Path(out_dir).glob("frame_*.png"))
-    if len(files) < 2: return {}
+    if len(files) < 2:
+        return {}
     mags = []; coh = []
     prev = cv2.imread(str(files[0]), cv2.IMREAD_GRAYSCALE)
     for f in files[1:]:
@@ -357,7 +369,8 @@ def optical_flow_series(out_dir: Path, fps: float = 2.0) -> Dict[str, Any]:
         med = float(np.median(mags)); std = float(np.std(mags))
         run = 0
         for i, (m, c) in enumerate(zip(mags, coh)):
-            if m > med + 1.0*std and c > 0.5: run += 1
+            if m > med + 1.0*std and c > 0.5:
+                run += 1
             else:
                 if run >= int(1*fps):
                     t = int((i - run/2)/fps)
@@ -370,14 +383,16 @@ def optical_flow_series(out_dir: Path, fps: float = 2.0) -> Dict[str, Any]:
 
 def detect_motion(vals: List[float], fps: float = 2.0) -> Dict[str, Any]:
     out = {"series": vals, "events": []}
-    if not vals or np is None: return out
+    if not vals or np is None:
+        return out
     arr = np.array(vals, dtype=np.float32)
     med = float(np.median(arr)); mean = float(np.mean(arr)); std = float(np.std(arr))
 
     # Freeze >= 2s
     low_thr = med * 0.4; run = 0
     for i, v in enumerate(arr):
-        if v <= low_thr: run += 1
+        if v <= low_thr:
+            run += 1
         else:
             if run >= int(2*fps):
                 t = int((i - run/2)/fps)
@@ -413,7 +428,8 @@ def detect_motion(vals: List[float], fps: float = 2.0) -> Dict[str, Any]:
 # -------- YOLO (optional) --------
 def load_yolo() -> bool:
     global YOLO_MODEL, YOLO_ELE_IDS
-    if YOLO is None: return False
+    if YOLO is None:
+        return False
     if YOLO_MODEL is None:
         try:
             YOLO_MODEL = YOLO("yolov8n.pt")
@@ -430,7 +446,8 @@ def load_yolo() -> bool:
     return YOLO_MODEL is not None
 
 def yolo_detect_frames(out_dir: Path, img_size: int = 640, conf: float = 0.25):
-    if not load_yolo(): return None
+    if not load_yolo():
+        return None
     files = sorted(Path(out_dir).glob("frame_*.png"))
     dets_per_frame = []
     for f in files:
@@ -458,7 +475,8 @@ def iou(a, b):
     ix2,iy2 = min(ax2,bx2), min(ay2,by2)
     w,h = max(0.0,ix2-ix1), max(0.0,iy2-iy1)
     inter = w*h
-    if inter<=0: return 0.0
+    if inter<=0:
+        return 0.0
     areaA=(ax2-ax1)*(ay2-ay1); areaB=(bx2-bx1)*(by2-by1)
     return inter/max(1e-6,(areaA+areaB-inter))
 
@@ -471,9 +489,11 @@ def track_iou(dets_per_frame: List[List[Dict[str,Any]]], iou_thr: float = 0.3):
         for pt in prev:
             best_i, best = -1, 0.0
             for i, d in enumerate(dets):
-                if i in used: continue
+                if i in used:
+                    continue
                 sc = iou(pt["xyxy"], d["xyxy"])
-                if sc > best: best, best_i = sc, i
+                if sc > best:
+                    best, best_i = sc, i
             if best >= iou_thr and best_i>=0:
                 assigned[best_i]=pt["id"]; used.add(best_i)
         for i in range(len(dets)):
@@ -485,7 +505,8 @@ def track_iou(dets_per_frame: List[List[Dict[str,Any]]], iou_thr: float = 0.3):
 
 def interactions_from_tracks(tracks_per_frame: List[List[Dict[str,Any]]], fps: float = 2.0) -> List[Dict[str,Any]]:
     events: List[Dict[str,Any]] = []
-    if not tracks_per_frame: return events
+    if not tracks_per_frame:
+        return events
     ear_state: Dict[int, Tuple[float,int]] = {}
     ear_run: Dict[int,int] = {}
     close_run: Dict[Tuple[int,int], int] = {}
@@ -540,10 +561,12 @@ def interactions_from_tracks(tracks_per_frame: List[List[Dict[str,Any]]], fps: f
 
 # -------- Fusion & summary --------
 def fuse_audio_motion(segments: List[Dict[str, Any]], motion: Dict[str, Any]) -> List[Dict[str, Any]]:
-    if not segments: return segments
+    if not segments:
+        return segments
     series = motion.get("series") or []; events = motion.get("events") or []
     if not series or np is None:
-        for s in segments: s["movement"]={"level":"unknown","notes":[]}
+        for s in segments:
+            s["movement"]={"level":"unknown","notes":[]}
         return segments
     arr = np.array(series, dtype=np.float32)
     med = float(np.median(arr)); q75 = float(np.quantile(arr, 0.75))
@@ -555,12 +578,17 @@ def fuse_audio_motion(segments: List[Dict[str, Any]], motion: Dict[str, Any]) ->
         notes = [ev["type"] for ev in events if ev.get("t") is not None and abs(ev["t"] - mid) <= 1]
         s["movement"]={"level":level,"value":mv_val,"notes":notes}
         boost=0.0; L=s["label"]
-        if "trumpet" in L or "roar" in L: boost = 0.1 if level!="low" else -0.05
-        elif "rumble" in L: boost = 0.07 if level in ("low","medium") else 0.02
-        elif "resting" in L: boost = 0.10 if level=="low" else -0.10
+        if "trumpet" in L or "roar" in L:
+            boost = 0.1 if level!="low" else -0.05
+        elif "rumble" in L:
+            boost = 0.07 if level in ("low","medium") else 0.02
+        elif "resting" in L:
+            boost = 0.10 if level=="low" else -0.10
         s["confidence"]=float(max(0.0,min(0.99,s["confidence"]+boost)))
-        if "trumpet" in L and level=="high": s["label"]="alarm/excitement (trumpet)"
-        if "roar" in L and level!="low": s["label"]="threat/defensive (roar)"
+        if "trumpet" in L and level=="high":
+            s["label"]="alarm/excitement (trumpet)"
+        if "roar" in L and level!="low":
+            s["label"]="threat/defensive (roar)"
     return segments
 
 def summarize(segments: List[Dict[str, Any]], motion_events: List[Dict[str, Any]], findings: List[str]):
@@ -587,8 +615,10 @@ def summarize(segments: List[Dict[str, Any]], motion_events: List[Dict[str, Any]
     else:                       msg = "General calling: tonal activity without specialized cues."
 
     notes = [ev["type"] for ev in motion_events if ev.get("t") is not None][:2]
-    if notes:    msg += " Motion: " + ", ".join(notes) + "."
-    if findings: msg += " Extra: " + ", ".join(findings[:2]) + "."
+    if notes:
+        msg += " Motion: " + ", ".join(notes) + "."
+    if findings:
+        msg += " Extra: " + ", ".join(findings[:2]) + "."
     return msg, conf
 
 # -------- Core analysis --------
@@ -664,7 +694,7 @@ def analyze_media_file(path: Path, include_motion: bool) -> Dict[str, Any]:
 # ------------------- API -------------------
 @app.get("/health")
 def health():
-    return {"status":"ok","api":"reset-stable v2.1 + richer audio (ascii)"}
+    return {"status":"ok","api":"reset-stable v2.2 + richer audio (ascii)"}
 
 @app.get("/config")
 def config():
