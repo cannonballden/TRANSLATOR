@@ -1,10 +1,10 @@
-# mini_api.py — reset-stable v1
+# mini_api.py — reset-stable v2 (richer audio detector)
 # FastAPI backend for Elephant Translator:
 # - Small files: POST /analyze (direct)
 # - Large files: /upload/init + /upload/part + /upload/finish (chunked)
-# - Audio heuristics (rumbles, trumpets, roars, etc.) with conservative mapping
+# - Audio heuristics with adaptive thresholds + richer features
 # - Video motion (frame-diff), optional optical flow (OpenCV), optional interactions (YOLO)
-# - CORS is wide-open to avoid GH Pages ↔ Codespaces origin mismatch during demo
+# - CORS open for GH Pages ↔ Codespaces demo
 
 import os, json, shutil, subprocess, uuid, logging, wave, contextlib, glob, math
 from pathlib import Path
@@ -14,19 +14,28 @@ from fastapi import FastAPI, UploadFile, File, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-# -------- Optional deps (graceful fallback if missing) --------
+# Optional deps (degrade gracefully)
 try:
     import numpy as np
 except Exception:
     np = None
+
+try:
+    from scipy.signal import butter, sosfiltfilt
+except Exception:
+    butter = None
+    sosfiltfilt = None
+
 try:
     from PIL import Image
 except Exception:
     Image = None
+
 try:
     import cv2
 except Exception:
     cv2 = None
+
 try:
     from ultralytics import YOLO
 except Exception:
@@ -57,7 +66,7 @@ for d in (UPLOAD_DIR, SESS_DIR, FRAME_DIR):
     d.mkdir(exist_ok=True, parents=True)
 
 # ------------------- App -------------------
-app = FastAPI(title="Elephant Translator — reset-stable v1")
+app = FastAPI(title="Elephant Translator — reset-stable v2")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOW_ORIGINS,
@@ -66,7 +75,7 @@ app.add_middleware(
     allow_credentials=False,
 )
 
-# ------------------- Utils -------------------
+# ------------------- Helpers -------------------
 def has_ffmpeg() -> bool:
     return shutil.which("ffmpeg") is not None
 
@@ -78,8 +87,7 @@ def _run(cmd: List[str]) -> Tuple[bool, str]:
         return (False, str(e))
 
 def convert_to_wav(src: Path, dst: Path, sr: int = 16000) -> bool:
-    if not has_ffmpeg():
-        return False
+    if not has_ffmpeg(): return False
     ok, out = _run(["ffmpeg","-y","-i",str(src),"-ac","1","-ar",str(sr),"-vn",str(dst)])
     if not ok: log.warning("ffmpeg failed: %s", out)
     return ok
@@ -102,7 +110,84 @@ def load_wav_pcm16(path: Path) -> Tuple[Optional["np.ndarray"], int]:
         x = x.reshape(-1, n_channels).mean(axis=1)
     return x, sr
 
-def frame_audio(x: "np.ndarray", sr: int, win_s: float = 0.6, hop_s: float = 0.3):
+def zcr(frame: "np.ndarray") -> float:
+    # zero-crossing rate (approx)
+    if frame.size < 2: return 0.0
+    s = np.sign(frame)
+    return float(np.mean((s[1:] != s[:-1]).astype(np.float32)))
+
+def butter_band_sos(low, high, sr, order=4):
+    if butter is None: return None
+    nyq = 0.5 * sr
+    low = max(1.0, low) / nyq
+    high = min(high/nyq, 0.999)
+    return butter(order, [low, high], btype='band', output='sos')
+
+def band_rms_fft(frame: "np.ndarray", sr: int, band: Tuple[float,float]) -> float:
+    # Fallback band energy via FFT (if scipy not present)
+    win = np.hamming(len(frame))
+    f = np.fft.rfft(frame * win)
+    mag = np.abs(f)
+    freqs = np.fft.rfftfreq(len(frame), 1.0/sr)
+    lo, hi = band
+    sel = (freqs >= lo) & (freqs < hi)
+    if not np.any(sel): return 0.0
+    power = float(np.mean((mag[sel])**2))
+    return float(np.sqrt(power + 1e-12))
+
+def band_rms(frame: "np.ndarray", sr: int, band: Tuple[float,float]) -> float:
+    # Prefer IIR bandpass if scipy available; else FFT estimate
+    if butter is not None:
+        sos = butter_band_sos(band[0], band[1], sr)
+        if sos is not None:
+            y = sosfiltfilt(sos, frame)
+            return float(np.sqrt(np.mean(y*y) + 1e-12))
+    return band_rms_fft(frame, sr, band)
+
+def spectral_stats(frame: "np.ndarray", sr: int, prev_mag: Optional["np.ndarray"]):
+    # Compute a set of spectral stats robustly
+    win = np.hamming(len(frame))
+    f = np.fft.rfft(frame * win)
+    mag = np.abs(f) + 1e-12
+    freqs = np.fft.rfftfreq(len(frame), 1.0/sr)
+
+    total = float(np.sum(mag))
+    centroid = float(np.sum(freqs * mag) / total)
+    flat = float(np.exp(np.mean(np.log(mag))) / (np.mean(mag) + 1e-12))
+    roll85_thresh = 0.85 * np.sum(mag)
+    cumsum = np.cumsum(mag); roll85_idx = int(np.searchsorted(cumsum, roll85_thresh))
+    roll85 = float(freqs[min(roll85_idx, len(freqs)-1)])
+
+    # Tonality: top peaks prominence
+    top = np.sort(mag)[-5:]
+    tone = float(top.sum() / (total + 1e-12))
+    peak_idx = int(np.argmax(mag)); peak_freq = float(freqs[peak_idx])
+
+    # Bands
+    low = float(np.sum(mag[(freqs >= 15) & (freqs < 80)]))
+    band30 = float(np.sum(mag[(freqs >= 30) & (freqs < 80)]))
+    mid = float(np.sum(mag[(freqs >= 100) & (freqs < 300)]))
+    upper_mid = float(np.sum(mag[(freqs >= 300) & (freqs < 1000)]))
+    high = float(np.sum(mag[(freqs >= 1000) & (freqs < 4000)]))
+
+    low_r = low/total; band30_r = band30/total; mid_r = mid/total
+    upper_mid_r = upper_mid/total; high_r = high/total
+
+    # spectral flux
+    if prev_mag is not None:
+        d = mag - prev_mag
+        flux = float(np.sqrt(np.sum(d*d)) / (len(d) + 1e-9))
+    else:
+        flux = 0.0
+
+    return {
+        "centroid": centroid, "flatness": flat, "roll85": roll85,
+        "peak_freq": peak_freq, "tonality": tone,
+        "low_r": low_r, "band30_r": band30_r, "mid_r": mid_r,
+        "upper_mid_r": upper_mid_r, "high_r": high_r,
+    }, mag
+
+def frame_audio(x: "np.ndarray", sr: int, win_s: float = 0.5, hop_s: float = 0.25):
     win = max(1, int(sr * win_s)); hop = max(1, int(sr * hop_s))
     idx = []; start = 0
     while start + win <= len(x):
@@ -110,156 +195,163 @@ def frame_audio(x: "np.ndarray", sr: int, win_s: float = 0.6, hop_s: float = 0.3
     if not idx and len(x) > 0: idx.append((0, len(x)))
     return idx
 
-def spectral_flatness(mag: "np.ndarray") -> float:
-    eps = 1e-9
-    gm = float(np.exp(np.mean(np.log(mag + eps))))
-    am = float(np.mean(mag + eps))
-    return gm / am
+def classify_audio_adaptive(x: "np.ndarray", sr: int):
+    """Adaptive per-file thresholds to avoid 'same result' syndrome."""
+    idx = frame_audio(x, sr, win_s=0.5, hop_s=0.25)
+    feats, prev_mag, frames = [], None, []
+    rms_list = []
 
-def spectral_rolloff(freqs: "np.ndarray", mag: "np.ndarray", pct: float = 0.85) -> float:
-    cumsum = np.cumsum(mag); thresh = pct * cumsum[-1]
-    idx = int(np.searchsorted(cumsum, thresh))
-    return float(freqs[min(idx, len(freqs)-1)])
+    for s0, s1 in idx:
+        fr = x[s0:s1]; frames.append(fr)
+        rms = float(np.sqrt(np.mean(fr*fr) + 1e-12))
+        rms_list.append(rms)
+        f, prev_mag = spectral_stats(fr, sr, prev_mag)
+        f["rms"] = rms
+        f["zcr"] = zcr(fr)
+        # extra band RMS (robust)
+        f["rms_low"] = band_rms(fr, sr, (15, 80))
+        f["rms_mid"] = band_rms(fr, sr, (100, 300))
+        f["rms_high"] = band_rms(fr, sr, (1000, 4000))
+        feats.append(f)
 
-def spectral_flux(prev_mag: Optional["np.ndarray"], mag: "np.ndarray") -> float:
-    if prev_mag is None: return 0.0
-    d = mag - prev_mag
-    return float(np.sqrt(np.sum(d * d)) / (len(d) + 1e-9))
-
-def tonal_peakness(mag: "np.ndarray") -> float:
-    if len(mag) < 8: return 0.0
-    top = float(np.sort(mag)[-5:].sum())
-    return float(top / (mag.sum() + 1e-9))
-
-def spectral_features(frame: "np.ndarray", sr: int, prev_mag: Optional["np.ndarray"]):
-    w = np.hamming(len(frame))
-    f = np.fft.rfft(frame * w); mag = np.abs(f) + 1e-9
-    freqs = np.fft.rfftfreq(len(frame), 1.0 / sr)
-    total = mag.sum()
-    centroid = float((freqs * mag).sum() / total)
-    flat = spectral_flatness(mag)
-    roll85 = spectral_rolloff(freqs, mag, pct=0.85)
-    flux = spectral_flux(prev_mag, mag)
-    peak_idx = int(np.argmax(mag)); peak_freq = float(freqs[peak_idx])
-    tone = tonal_peakness(mag)
-    low = float(mag[(freqs < 80)].sum())
-    band30 = float(mag[(freqs >= 30) & (freqs < 80)].sum())
-    mid = float(mag[(freqs >= 100) & (freqs < 300)].sum())
-    upper_mid = float(mag[(freqs >= 300) & (freqs < 1000)].sum())
-    high = float(mag[(freqs >= 1000) & (freqs < 4000)].sum())
-    low_r = low / total; band30_r = band30/total; mid_r = mid/total
-    upper_mid_r = upper_mid/total; high_r = high/total
-    rms = float(np.sqrt(np.mean(frame ** 2)))
-    feat = {
-        "rms": rms, "centroid": centroid, "flatness": flat, "roll85": roll85, "flux": flux,
-        "peak_freq": peak_freq, "tonality": tone,
-        "low_r": low_r, "band30_r": band30_r, "mid_r": mid_r,
-        "upper_mid_r": upper_mid_r, "high_r": high_r
-    }
-    return feat, mag
-
-def classify_audio(x: "np.ndarray", sr: int):
-    idx = frame_audio(x, sr, win_s=0.6, hop_s=0.3)
-    feats = []; prev_mag = None
-    for (s, e) in idx:
-        f, prev_mag = spectral_features(x[s:e], sr, prev_mag); feats.append(f)
     if not feats:
         return [], 0.0, []
-    rms_vals = np.array([f["rms"] for f in feats], dtype=np.float32)
-    energy_med = float(np.median(rms_vals))
-    energy_hi = float(np.quantile(rms_vals, 0.75))
-    cent = np.array([f["centroid"] for f in feats], dtype=np.float32)
-    slope = np.zeros_like(cent)
-    if len(cent) >= 3:
-        slope[1:-1] = (cent[2:] - cent[:-2]) / 2.0
-    dur = len(x) / sr
+
+    # Adaptive calibration
+    rms_med = float(np.median(rms_list))
+    rms_p90 = float(np.quantile(rms_list, 0.90))
+    noise_floor = float(np.median(sorted(rms_list)[:max(1, len(rms_list)//5)]))  # bottom 20%
+    def snr_db(r): return 20.0 * math.log10((r + 1e-9) / (noise_floor + 1e-9))
 
     labels = []
     tonal_marks = []
-    for i, (samp, (s0, s1)) in enumerate(zip(feats, idx)):
+    duration = len(x) / sr
+
+    # For trend of centroid (let's-go)
+    centroids = np.array([f["centroid"] for f in feats], dtype=np.float32)
+
+    for i, (f, (s0, s1)) in enumerate(zip(feats, idx)):
         start_t = s0 / sr; end_t = s1 / sr
-        label, conf = "calling", 0.55
+        snr = snr_db(f["rms"])
+        # default
+        label, conf = "ambient / uncertain", 0.45
 
-        if samp["rms"] > max(energy_hi, energy_med * 1.6) and samp["high_r"] > 0.35 and samp["centroid"] > 1200:
-            label = "trumpet"; conf = min(0.97, 0.65 + 0.4*samp["high_r"] + 0.0001*(samp["centroid"]-1200))
-        elif samp["rms"] > energy_med * 0.8 and samp["low_r"] > 0.33 and samp["centroid"] < 180 and samp["flatness"] < 0.5:
-            label = "contact rumble"; conf = min(0.92, 0.6 + 0.5*samp["low_r"])
-        elif samp["rms"] > energy_med * 0.9 and samp["low_r"] > 0.28 and slope[i] > 30 and samp["centroid"] < 260:
-            label = "let’s-go rumble (matriarch)"; conf = min(0.9, 0.55 + 0.5*min(1.0, slope[i]/120.0))
-        elif samp["rms"] > energy_med * 0.9 and samp["low_r"] > 0.25 and samp["flatness"] > 0.6 and samp["centroid"] < 220:
-            label = "musth-like buzz (male)"; conf = min(0.86, 0.5 + 0.6*(samp["flatness"] - 0.6 + samp["low_r"]))
-        elif samp["rms"] > energy_med and samp["upper_mid_r"] > 0.28 and samp["flatness"] > 0.55:
-            label = "roar / rumble-roar"; conf = min(0.9, 0.55 + 0.5*samp["upper_mid_r"])
-        elif 250 <= samp["centroid"] <= 600 and samp["rms"] > energy_med * 0.8 and (s1 - s0) / sr <= 0.75:
-            label = "estrous rumble (female)"; conf = 0.72
-        elif samp["rms"] < energy_med * 0.6:
-            label = "resting / low arousal"; conf = min(0.82, 0.6 + (energy_med*0.6 - samp["rms"])*3.0)
-        else:
-            if samp["tonality"] > 0.22 and samp["low_r"] > 0.2 and 80 < samp["peak_freq"] < 400:
-                label = "possible individual-address rumble (uncertain)"; conf = 0.62
+        # candidate detectors
+        # trumpets: bright high energy, high centroid, high SNR, high ZCR
+        if (snr > 6 and f["high_r"] > 0.35 and f["centroid"] > 1100 and f["zcr"] > 0.05):
+            label, conf = "trumpet", min(0.98, 0.60 + 0.4*f["high_r"])
 
-        if samp["tonality"] > 0.22 and 60 < samp["peak_freq"] < 500:
-            tonal_marks.append((start_t, samp["peak_freq"]))
+        # roars: upper-mid energy + noisy spectrum
+        elif (snr > 4 and f["upper_mid_r"] > 0.33 and f["flatness"] > 0.55 and f["centroid"] > 400):
+            label, conf = "roar / rumble-roar", min(0.93, 0.55 + 0.4*f["upper_mid_r"] + 0.2*(f["flatness"]-0.55))
+
+        # contact rumble: deep, tonal, centroid < 160, low band dominant
+        elif (snr > 3 and f["low_r"] > 0.35 and f["centroid"] < 160 and f["flatness"] < 0.5 and f["peak_freq"] < 120):
+            label, conf = "contact rumble", min(0.94, 0.58 + 0.5*f["low_r"])
+
+        # let's-go rumble: rising centroid trend across 3 frames, still low-ish centroid
+        elif (snr > 3 and f["low_r"] > 0.28 and f["centroid"] < 260 and
+              i >= 2 and (centroids[i-2] < centroids[i-1] < centroids[i])):
+            label, conf = "let’s-go rumble (matriarch-like)", min(0.90, 0.55 + 0.4*(centroids[i]-centroids[max(0,i-3)]) / 200.0)
+
+        # musth-like buzz: deep + noisy (flatness high) low centroid
+        elif (snr > 3 and f["low_r"] > 0.25 and f["flatness"] > 0.62 and f["centroid"] < 220):
+            label, conf = "musth-like buzz (male)", min(0.88, 0.52 + 0.5*(f["flatness"]-0.62 + f["low_r"]))
+
+        # estrous rumble: short, somewhat higher centroid rumble
+        elif (snr > 3 and 250 <= f["centroid"] <= 600 and (s1-s0)/sr <= 0.8 and f["tonality"] > 0.15):
+            label, conf = "estrous rumble (female-like)", 0.74
+
+        # resting/low arousal: near noise floor, low motion cue likely
+        elif (f["rms"] < max(noise_floor*1.2, rms_med*0.6)):
+            label, conf = "resting / low arousal", min(0.85, 0.6 + (max(noise_floor*1.2, rms_med*0.6) - f["rms"]) * 4.0)
+
+        # possible individual-address rumble: narrow tonal peak in rumble bands
+        elif (snr > 2 and f["tonality"] > 0.22 and f["low_r"] > 0.2 and 60 < f["peak_freq"] < 400):
+            label, conf = "possible individual-address rumble (uncertain)", 0.64
+
+        # collect tonal marks for later “name-like” detection
+        if f["tonality"] > 0.22 and 60 < f["peak_freq"] < 500:
+            tonal_marks.append((start_t, f["peak_freq"]))
 
         labels.append({
             "start": float(start_t), "end": float(end_t),
-            "label": label, "confidence": float(max(0.0, min(conf, 0.99))),
+            "label": label,
+            "confidence": float(max(0.0, min(conf, 0.99))),
             "explanation": (
-                f"rms={samp['rms']:.3f}, centroid={samp['centroid']:.0f}Hz, flat={samp['flatness']:.2f}, "
-                f"bands(low={samp['low_r']:.2f}, 30-80={samp['band30_r']:.2f}, mid={samp['mid_r']:.2f}, "
-                f"uMid={samp['upper_mid_r']:.2f}, high={samp['high_r']:.2f}), "
-                f"peak={samp['peak_freq']:.0f}Hz, slope={slope[i]:.1f}"
+                f"snr={snr:.1f}dB, centroid={f['centroid']:.0f}Hz, flat={f['flatness']:.2f}, "
+                f"bands(low={f['low_r']:.2f}, 30-80={f['band30_r']:.2f}, mid={f['mid_r']:.2f}, "
+                f"uMid={f['upper_mid_r']:.2f}, high={f['high_r']:.2f}), "
+                f"peak={f['peak_freq']:.0f}Hz, zcr={f['zcr']:.3f}"
             ),
-            "features": samp
+            "features": f
         })
 
-    # Merge contiguous same-label
-    merged = []
+    # Merge contiguous segments with same label; smooth single-frame islands
+    merged: List[Dict[str, Any]] = []
     for seg in labels:
-        if merged and merged[-1]["label"] == seg["label"] and abs(merged[-1]["end"] - seg["start"]) < 1e-6:
+        if merged and merged[-1]["label"] == seg["label"] and abs(merged[-1]["end"] - seg["start"]) <= 1e-6:
+            # extend
             merged[-1]["end"] = seg["end"]
             merged[-1]["confidence"] = float((merged[-1]["confidence"] + seg["confidence"]) / 2.0)
         else:
             merged.append(seg)
 
-    # Greeting chorus if rumble overlaps trumpet/roar within ~2s
+    # Smooth: if a single short segment is flanked by same label, merge it away
+    smoothed: List[Dict[str, Any]] = []
+    i = 0
+    while i < len(merged):
+        if 0 < i < len(merged)-1:
+            prevL = merged[i-1]["label"]; nextL = merged[i+1]["label"]
+            cur = merged[i]; dur = cur["end"] - cur["start"]
+            if prevL == nextL and dur <= 0.35:
+                # absorb into neighbors
+                smoothed[-1]["end"] = merged[i+1]["end"]
+                smoothed[-1]["confidence"] = float(max(smoothed[-1]["confidence"], merged[i+1]["confidence"]))
+                i += 2; continue
+        smoothed.append(merged[i]); i += 1
+
+    merged = smoothed
+
+    # Greeting chorus: rumble + (trumpet or roar) overlapping/adjacent
     for i in range(len(merged)):
         for j in range(i+1, len(merged)):
             a, b = merged[i], merged[j]
             if b["start"] > a["end"] + 2.0: break
-            chorus_pair = (
+            pair = (
                 ("trumpet" in a["label"] or "roar" in a["label"]) and ("rumble" in b["label"])
             ) or (
                 ("trumpet" in b["label"] or "roar" in b["label"]) and ("rumble" in a["label"])
             )
-            if chorus_pair and min(a["end"], b["end"]) - max(a["start"], b["start"]) > -1.0:
+            if pair and (min(a["end"], b["end"]) - max(a["start"], b["start"])) > -0.8:
                 a["label"] = b["label"] = "greeting chorus (family reunion)"
-                a["confidence"] = b["confidence"] = min(0.95, max(a["confidence"], b["confidence"]) + 0.05)
+                a["confidence"] = b["confidence"] = min(0.96, max(a["confidence"], b["confidence"]) + 0.08)
 
+    # File-level findings
     findings = []
-    # Antiphonal timing (rumble→rumble 1–5s gap)
-    last_end = None; last_is_rumble = False
+    # Antiphonal exchange: rumble → rumble with 1–5s gap
+    last_end = None; last_rumble = False
     for s in merged:
         is_rumbleish = "rumble" in s["label"]
-        if last_is_rumble and is_rumbleish and last_end is not None:
+        if last_rumble and is_rumbleish and last_end is not None:
             gap = s["start"] - last_end
             if 1.0 <= gap <= 5.0:
                 findings.append("possible antiphonal exchange (call-and-response timing)")
                 break
-        last_is_rumble = is_rumbleish; last_end = s["end"]
+        last_rumble = is_rumbleish; last_end = s["end"]
 
-    # Name-like repeats (narrow tonal repeats within 8–20s)
+    # Name-like repeats: narrow tonal peaks repeating 8–20s apart
     if len(tonal_marks) >= 2:
         tonal_marks.sort()
-        for i in range(len(tonal_marks)-1):
-            t1, f1 = tonal_marks[i]; t2, f2 = tonal_marks[i+1]
+        for k in range(len(tonal_marks)-1):
+            t1, f1 = tonal_marks[k]; t2, f2 = tonal_marks[k+1]
             if 8.0 <= (t2 - t1) <= 20.0 and abs(f2 - f1) <= 25.0:
                 findings.append("possible individual-address rumble (repeated narrow peak)")
                 break
 
-    return merged, float(dur), findings
+    return merged, float(duration), findings
 
-# -------- Frames & motion --------
+# -------- Video extraction & motion (same as before) --------
 def extract_frames(path: Path, out_dir: Path, fps: float = 2.0, width: int = 256) -> bool:
     if not has_ffmpeg(): return False
     for f in glob.glob(str(out_dir / "frame_*.png")):
@@ -355,7 +447,7 @@ def detect_motion(vals: List[float], fps: float = 2.0) -> Dict[str, Any]:
         out["events"].append({"t": None, "type": "high excitement (motion)", "detail": "sustained"})
     return out
 
-# -------- YOLO (optional) for interactions --------
+# -------- YOLO (optional) --------
 def load_yolo() -> bool:
     global YOLO_MODEL, YOLO_ELE_IDS
     if YOLO is None: return False
@@ -447,7 +539,7 @@ def interactions_from_tracks(tracks_per_frame: List[List[Dict[str,Any]]], fps: f
                 ear_run[tr["id"]] = ear_run.get(tr["id"],0)+1
             else:
                 if ear_run.get(tr["id"],0) >= int(1.0*fps):
-                    events.append({"t": int((t - ear_run[tr["id"]]/2)/fps), "type":"ear spread (threat display)","detail":f"ratio≈{ratio:.2f}"})
+                    events.append({"t": int((t - ear_run[tr["id']]/2)/fps), "type":"ear spread (threat display)","detail":f"ratio≈{ratio:.2f}"})
                 ear_run[tr["id"]] = 0
 
         # Close-contact greeting: head-to-head proximity ≥1.5s
@@ -488,7 +580,8 @@ def fuse_audio_motion(segments: List[Dict[str, Any]], motion: Dict[str, Any]) ->
     med = float(np.median(arr)); q75 = float(np.quantile(arr, 0.75))
     for s in segments:
         mid = int((s["start"] + s["end"]) / 2.0)
-        mv_val = float(arr[min(mid, len(arr)-1)])
+        mid = max(0, min(mid, len(arr)-1))
+        mv_val = float(arr[mid])
         level = "low" if mv_val < med*0.8 else ("medium" if mv_val < q75*1.1 else "high")
         notes = [ev["type"] for ev in events if ev.get("t") is not None and abs(ev["t"] - mid) <= 1]
         s["movement"]={"level":level,"value":mv_val,"notes":notes}
@@ -502,32 +595,38 @@ def fuse_audio_motion(segments: List[Dict[str, Any]], motion: Dict[str, Any]) ->
     return segments
 
 def summarize(segments: List[Dict[str, Any]], motion_events: List[Dict[str, Any]], findings: List[str]):
-    if not segments: return ("Insufficient evidence to interpret.", 0.4)
+    if not segments:
+        return ("No clear elephant vocalizations detected (audio too quiet or noisy).", 0.4)
+    # if mostly ambient, say so
+    meaningful = [s for s in segments if not s["label"].startswith("ambient")]
+    if not meaningful:
+        return ("Ambient/uncertain audio; no distinctive elephant calls.", 0.45)
+
     score={}
-    for s in segments:
+    for s in meaningful:
         score[s["label"]] = score.get(s["label"],0.0)+(s["end"]-s["start"])*(0.5+0.5*s["confidence"])
     top = max(score.items(), key=lambda kv: kv[1])[0]
-    conf = float(np.median([s["confidence"] for s in segments])) if np is not None else 0.7
+    conf = float(np.median([s["confidence"] for s in meaningful])) if np is not None else 0.7
 
-    if "greeting chorus" in top: msg = "Family reunion chorus—overlapping rumbles + trumpets/roars; strong social excitement."
-    elif "let’s-go" in top:      msg = "Likely travel initiation—rising rumble; herd may begin moving."
+    if "greeting chorus" in top: msg = "Family reunion chorus—overlapping rumbles with trumpets/roars; strong social excitement."
+    elif "let’s-go" in top:      msg = "Likely travel initiation—rising rumble; group preparing to move."
     elif "musth" in top:        msg = "Musth-like buzz (male)—status/dominance broadcast."
-    elif "trumpet" in top:      msg = "Alarm/excitement—bright trumpet; give space."
-    elif "roar" in top:         msg = "Defensive/agitated—harsh roar; keep distance."
+    elif "trumpet" in top:      msg = "Alarm/excitement—bright trumpet; keep distance."
+    elif "roar" in top:         msg = "Defensive/agitated—harsh roar; back away."
     elif "estrous" in top:      msg = "Estrous rumble—female receptivity cue."
-    elif "contact rumble" in top: msg = "Contact/coordination rumble—keeping in touch."
-    elif "resting" in top:      msg = "Calm/resting—low energy and limited motion."
+    elif "contact rumble" in top: msg = "Contact rumble—maintaining social contact/coordination."
+    elif "resting" in top:      msg = "Calm/resting—low arousal and limited motion."
     else:                       msg = "General calling—tonal activity without specialized cues."
 
     notes = [ev["type"] for ev in motion_events if ev.get("t") is not None][:2]
-    if notes:    msg += f" Motion notes: {', '.join(notes)}."
-    if findings: msg += f" Extra cues: {', '.join(findings[:2])}."
+    if notes:    msg += f" Motion: {', '.join(notes)}."
+    if findings: msg += f" Extra: {', '.join(findings[:2])}."
     return msg, conf
 
 # -------- Core analysis --------
 def analyze_media_file(path: Path, include_motion: bool) -> Dict[str, Any]:
     diagnostics = {"ffmpeg": has_ffmpeg(), "numpy": bool(np is not None), "pillow": bool(Image is not None),
-                   "opencv": bool(cv2 is not None), "yolo": False}
+                   "opencv": bool(cv2 is not None), "yolo": False, "scipy": bool(butter is not None)}
     wav_tmp = UPLOAD_DIR / f"conv_{uuid.uuid4().hex}.wav"
     audio_ok=False; motion={"series": [], "events": []}; duration=0.0
     try:
@@ -539,16 +638,16 @@ def analyze_media_file(path: Path, include_motion: bool) -> Dict[str, Any]:
         segments=[]; findings=[]
         if audio_ok and np is not None:
             x, sr = load_wav_pcm16(wav_tmp)
-            if x is not None:
-                segments, duration, findings = classify_audio(x, sr)
+            if x is not None and len(x) > 0:
+                segments, duration, findings = classify_audio_adaptive(x, sr)
         elif audio_ok:
             with contextlib.closing(wave.open(str(wav_tmp), "rb")) as wf:
                 sr=wf.getframerate(); n=wf.getnframes(); duration=n/max(1,sr)
-            segments=[{"start":0.0,"end":float(duration),"label":"calling",
+            segments=[{"start":0.0,"end":float(duration),"label":"ambient / uncertain",
                        "explanation":"Decoded audio without numpy; detailed features unavailable.",
-                       "confidence":0.6,"features":{}}]
+                       "confidence":0.5,"features":{}}]
         else:
-            segments=[{"start":0.0,"end":5.0,"label":"uncertain",
+            segments=[{"start":0.0,"end":5.0,"label":"ambient / uncertain",
                        "explanation":"Could not decode audio (install ffmpeg or upload WAV).",
                        "confidence":0.45,"features":{}}]
             duration=5.0
@@ -571,9 +670,13 @@ def analyze_media_file(path: Path, include_motion: bool) -> Dict[str, Any]:
         segments = fuse_audio_motion(segments, motion)
         summary_text, overall_conf = summarize(segments, motion.get("events", []), findings)
 
+        # quick species confidence heuristic: proportion of frames where low band dominates
+        elephant_likely = float(np.mean([1.0 if (("rumble" in s["label"]) or ("chorus" in s["label"])) else 0.0 for s in segments])) if np is not None else 0.6
+        species_conf = min(0.95, 0.55 + 0.45*elephant_likely)
+
         return {
             "file": path.name,
-            "species": {"label":"African elephant (heuristic)","confidence":0.86},
+            "species": {"label":"African elephant (heuristic)", "confidence": float(species_conf)},
             "segments": segments,
             "summary": summary_text,
             "overall_confidence": float(min(0.99, overall_conf)),
@@ -594,7 +697,7 @@ def analyze_media_file(path: Path, include_motion: bool) -> Dict[str, Any]:
 # ------------------- API -------------------
 @app.get("/health")
 def health():
-    return {"status":"ok","api":"reset-stable v1 + video+interact"}
+    return {"status":"ok","api":"reset-stable v2 + richer audio"}
 
 @app.get("/config")
 def config():
