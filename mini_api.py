@@ -1,10 +1,10 @@
-# mini_api.py — reset-stable v2 (richer audio detector)
+# mini_api.py -- reset-stable v2.1 (ascii-safe, richer audio detector)
 # FastAPI backend for Elephant Translator:
 # - Small files: POST /analyze (direct)
 # - Large files: /upload/init + /upload/part + /upload/finish (chunked)
 # - Audio heuristics with adaptive thresholds + richer features
 # - Video motion (frame-diff), optional optical flow (OpenCV), optional interactions (YOLO)
-# - CORS open for GH Pages ↔ Codespaces demo
+# - CORS open for GH Pages <-> Codespaces demo. ASCII-only strings to avoid Unicode source issues.
 
 import os, json, shutil, subprocess, uuid, logging, wave, contextlib, glob, math
 from pathlib import Path
@@ -66,7 +66,7 @@ for d in (UPLOAD_DIR, SESS_DIR, FRAME_DIR):
     d.mkdir(exist_ok=True, parents=True)
 
 # ------------------- App -------------------
-app = FastAPI(title="Elephant Translator — reset-stable v2")
+app = FastAPI(title="Elephant Translator -- reset-stable v2.1 (ascii)")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOW_ORIGINS,
@@ -92,7 +92,7 @@ def convert_to_wav(src: Path, dst: Path, sr: int = 16000) -> bool:
     if not ok: log.warning("ffmpeg failed: %s", out)
     return ok
 
-def load_wav_pcm16(path: Path) -> Tuple[Optional["np.ndarray"], int]:
+def load_wav_pcm16(path: Path) -> Tuple[Optional("np.ndarray"), int]:
     with contextlib.closing(wave.open(str(path), "rb")) as wf:
         n_channels = wf.getnchannels()
         sr = wf.getframerate()
@@ -111,7 +111,6 @@ def load_wav_pcm16(path: Path) -> Tuple[Optional["np.ndarray"], int]:
     return x, sr
 
 def zcr(frame: "np.ndarray") -> float:
-    # zero-crossing rate (approx)
     if frame.size < 2: return 0.0
     s = np.sign(frame)
     return float(np.mean((s[1:] != s[:-1]).astype(np.float32)))
@@ -124,7 +123,6 @@ def butter_band_sos(low, high, sr, order=4):
     return butter(order, [low, high], btype='band', output='sos')
 
 def band_rms_fft(frame: "np.ndarray", sr: int, band: Tuple[float,float]) -> float:
-    # Fallback band energy via FFT (if scipy not present)
     win = np.hamming(len(frame))
     f = np.fft.rfft(frame * win)
     mag = np.abs(f)
@@ -136,7 +134,6 @@ def band_rms_fft(frame: "np.ndarray", sr: int, band: Tuple[float,float]) -> floa
     return float(np.sqrt(power + 1e-12))
 
 def band_rms(frame: "np.ndarray", sr: int, band: Tuple[float,float]) -> float:
-    # Prefer IIR bandpass if scipy available; else FFT estimate
     if butter is not None:
         sos = butter_band_sos(band[0], band[1], sr)
         if sos is not None:
@@ -144,8 +141,7 @@ def band_rms(frame: "np.ndarray", sr: int, band: Tuple[float,float]) -> float:
             return float(np.sqrt(np.mean(y*y) + 1e-12))
     return band_rms_fft(frame, sr, band)
 
-def spectral_stats(frame: "np.ndarray", sr: int, prev_mag: Optional["np.ndarray"]):
-    # Compute a set of spectral stats robustly
+def spectral_stats(frame: "np.ndarray", sr: int, prev_mag: Optional("np.ndarray")):
     win = np.hamming(len(frame))
     f = np.fft.rfft(frame * win)
     mag = np.abs(f) + 1e-12
@@ -158,12 +154,10 @@ def spectral_stats(frame: "np.ndarray", sr: int, prev_mag: Optional["np.ndarray"
     cumsum = np.cumsum(mag); roll85_idx = int(np.searchsorted(cumsum, roll85_thresh))
     roll85 = float(freqs[min(roll85_idx, len(freqs)-1)])
 
-    # Tonality: top peaks prominence
     top = np.sort(mag)[-5:]
     tone = float(top.sum() / (total + 1e-12))
     peak_idx = int(np.argmax(mag)); peak_freq = float(freqs[peak_idx])
 
-    # Bands
     low = float(np.sum(mag[(freqs >= 15) & (freqs < 80)]))
     band30 = float(np.sum(mag[(freqs >= 30) & (freqs < 80)]))
     mid = float(np.sum(mag[(freqs >= 100) & (freqs < 300)]))
@@ -173,7 +167,6 @@ def spectral_stats(frame: "np.ndarray", sr: int, prev_mag: Optional["np.ndarray"
     low_r = low/total; band30_r = band30/total; mid_r = mid/total
     upper_mid_r = upper_mid/total; high_r = high/total
 
-    # spectral flux
     if prev_mag is not None:
         d = mag - prev_mag
         flux = float(np.sqrt(np.sum(d*d)) / (len(d) + 1e-9))
@@ -196,81 +189,58 @@ def frame_audio(x: "np.ndarray", sr: int, win_s: float = 0.5, hop_s: float = 0.2
     return idx
 
 def classify_audio_adaptive(x: "np.ndarray", sr: int):
-    """Adaptive per-file thresholds to avoid 'same result' syndrome."""
     idx = frame_audio(x, sr, win_s=0.5, hop_s=0.25)
-    feats, prev_mag, frames = [], None, []
-    rms_list = []
+    feats, prev_mag, rms_list = [], None, []
+    centroids = []
 
     for s0, s1 in idx:
-        fr = x[s0:s1]; frames.append(fr)
+        fr = x[s0:s1]
         rms = float(np.sqrt(np.mean(fr*fr) + 1e-12))
-        rms_list.append(rms)
         f, prev_mag = spectral_stats(fr, sr, prev_mag)
         f["rms"] = rms
         f["zcr"] = zcr(fr)
-        # extra band RMS (robust)
         f["rms_low"] = band_rms(fr, sr, (15, 80))
         f["rms_mid"] = band_rms(fr, sr, (100, 300))
         f["rms_high"] = band_rms(fr, sr, (1000, 4000))
         feats.append(f)
+        rms_list.append(rms)
+        centroids.append(f["centroid"])
 
     if not feats:
         return [], 0.0, []
 
-    # Adaptive calibration
     rms_med = float(np.median(rms_list))
     rms_p90 = float(np.quantile(rms_list, 0.90))
-    noise_floor = float(np.median(sorted(rms_list)[:max(1, len(rms_list)//5)]))  # bottom 20%
+    noise_floor = float(np.median(sorted(rms_list)[:max(1, len(rms_list)//5)]))
     def snr_db(r): return 20.0 * math.log10((r + 1e-9) / (noise_floor + 1e-9))
 
     labels = []
     tonal_marks = []
     duration = len(x) / sr
 
-    # For trend of centroid (let's-go)
-    centroids = np.array([f["centroid"] for f in feats], dtype=np.float32)
-
-    for i, (f, (s0, s1)) in enumerate(zip(feats, idx)):
+    for i, ((s0, s1), f) in enumerate(zip(idx, feats)):
         start_t = s0 / sr; end_t = s1 / sr
         snr = snr_db(f["rms"])
-        # default
         label, conf = "ambient / uncertain", 0.45
 
-        # candidate detectors
-        # trumpets: bright high energy, high centroid, high SNR, high ZCR
         if (snr > 6 and f["high_r"] > 0.35 and f["centroid"] > 1100 and f["zcr"] > 0.05):
             label, conf = "trumpet", min(0.98, 0.60 + 0.4*f["high_r"])
-
-        # roars: upper-mid energy + noisy spectrum
         elif (snr > 4 and f["upper_mid_r"] > 0.33 and f["flatness"] > 0.55 and f["centroid"] > 400):
             label, conf = "roar / rumble-roar", min(0.93, 0.55 + 0.4*f["upper_mid_r"] + 0.2*(f["flatness"]-0.55))
-
-        # contact rumble: deep, tonal, centroid < 160, low band dominant
         elif (snr > 3 and f["low_r"] > 0.35 and f["centroid"] < 160 and f["flatness"] < 0.5 and f["peak_freq"] < 120):
             label, conf = "contact rumble", min(0.94, 0.58 + 0.5*f["low_r"])
-
-        # let's-go rumble: rising centroid trend across 3 frames, still low-ish centroid
         elif (snr > 3 and f["low_r"] > 0.28 and f["centroid"] < 260 and
               i >= 2 and (centroids[i-2] < centroids[i-1] < centroids[i])):
-            label, conf = "let’s-go rumble (matriarch-like)", min(0.90, 0.55 + 0.4*(centroids[i]-centroids[max(0,i-3)]) / 200.0)
-
-        # musth-like buzz: deep + noisy (flatness high) low centroid
+            label, conf = "let's-go rumble (matriarch-like)", min(0.90, 0.55 + 0.4*(centroids[i]-centroids[max(0,i-3)]) / 200.0)
         elif (snr > 3 and f["low_r"] > 0.25 and f["flatness"] > 0.62 and f["centroid"] < 220):
             label, conf = "musth-like buzz (male)", min(0.88, 0.52 + 0.5*(f["flatness"]-0.62 + f["low_r"]))
-
-        # estrous rumble: short, somewhat higher centroid rumble
         elif (snr > 3 and 250 <= f["centroid"] <= 600 and (s1-s0)/sr <= 0.8 and f["tonality"] > 0.15):
             label, conf = "estrous rumble (female-like)", 0.74
-
-        # resting/low arousal: near noise floor, low motion cue likely
         elif (f["rms"] < max(noise_floor*1.2, rms_med*0.6)):
             label, conf = "resting / low arousal", min(0.85, 0.6 + (max(noise_floor*1.2, rms_med*0.6) - f["rms"]) * 4.0)
-
-        # possible individual-address rumble: narrow tonal peak in rumble bands
         elif (snr > 2 and f["tonality"] > 0.22 and f["low_r"] > 0.2 and 60 < f["peak_freq"] < 400):
             label, conf = "possible individual-address rumble (uncertain)", 0.64
 
-        # collect tonal marks for later “name-like” detection
         if f["tonality"] > 0.22 and 60 < f["peak_freq"] < 500:
             tonal_marks.append((start_t, f["peak_freq"]))
 
@@ -279,25 +249,22 @@ def classify_audio_adaptive(x: "np.ndarray", sr: int):
             "label": label,
             "confidence": float(max(0.0, min(conf, 0.99))),
             "explanation": (
-                f"snr={snr:.1f}dB, centroid={f['centroid']:.0f}Hz, flat={f['flatness']:.2f}, "
-                f"bands(low={f['low_r']:.2f}, 30-80={f['band30_r']:.2f}, mid={f['mid_r']:.2f}, "
-                f"uMid={f['upper_mid_r']:.2f}, high={f['high_r']:.2f}), "
-                f"peak={f['peak_freq']:.0f}Hz, zcr={f['zcr']:.3f}"
+                "snr={:.1f}dB, centroid={}Hz, flat={:.2f}, bands(low={:.2f}, 30-80={:.2f}, mid={:.2f}, uMid={:.2f}, high={:.2f}), peak={}Hz, zcr={:.3f}"
+                .format(snr, int(f['centroid']), f['flatness'], f['low_r'], f['band30_r'], f['mid_r'], f['upper_mid_r'], f['high_r'], int(f['peak_freq']), f['zcr'])
             ),
             "features": f
         })
 
-    # Merge contiguous segments with same label; smooth single-frame islands
+    # Merge contiguous same-label
     merged: List[Dict[str, Any]] = []
     for seg in labels:
         if merged and merged[-1]["label"] == seg["label"] and abs(merged[-1]["end"] - seg["start"]) <= 1e-6:
-            # extend
             merged[-1]["end"] = seg["end"]
             merged[-1]["confidence"] = float((merged[-1]["confidence"] + seg["confidence"]) / 2.0)
         else:
             merged.append(seg)
 
-    # Smooth: if a single short segment is flanked by same label, merge it away
+    # Smooth single short islands if flanked by same label
     smoothed: List[Dict[str, Any]] = []
     i = 0
     while i < len(merged):
@@ -305,15 +272,13 @@ def classify_audio_adaptive(x: "np.ndarray", sr: int):
             prevL = merged[i-1]["label"]; nextL = merged[i+1]["label"]
             cur = merged[i]; dur = cur["end"] - cur["start"]
             if prevL == nextL and dur <= 0.35:
-                # absorb into neighbors
                 smoothed[-1]["end"] = merged[i+1]["end"]
                 smoothed[-1]["confidence"] = float(max(smoothed[-1]["confidence"], merged[i+1]["confidence"]))
                 i += 2; continue
         smoothed.append(merged[i]); i += 1
-
     merged = smoothed
 
-    # Greeting chorus: rumble + (trumpet or roar) overlapping/adjacent
+    # Greeting chorus: rumble plus trumpet/roar overlapping or near-overlap
     for i in range(len(merged)):
         for j in range(i+1, len(merged)):
             a, b = merged[i], merged[j]
@@ -329,7 +294,6 @@ def classify_audio_adaptive(x: "np.ndarray", sr: int):
 
     # File-level findings
     findings = []
-    # Antiphonal exchange: rumble → rumble with 1–5s gap
     last_end = None; last_rumble = False
     for s in merged:
         is_rumbleish = "rumble" in s["label"]
@@ -340,7 +304,6 @@ def classify_audio_adaptive(x: "np.ndarray", sr: int):
                 break
         last_rumble = is_rumbleish; last_end = s["end"]
 
-    # Name-like repeats: narrow tonal peaks repeating 8–20s apart
     if len(tonal_marks) >= 2:
         tonal_marks.sort()
         for k in range(len(tonal_marks)-1):
@@ -351,7 +314,7 @@ def classify_audio_adaptive(x: "np.ndarray", sr: int):
 
     return merged, float(duration), findings
 
-# -------- Video extraction & motion (same as before) --------
+# -------- Video extraction & motion --------
 def extract_frames(path: Path, out_dir: Path, fps: float = 2.0, width: int = 256) -> bool:
     if not has_ffmpeg(): return False
     for f in glob.glob(str(out_dir / "frame_*.png")):
@@ -398,11 +361,11 @@ def optical_flow_series(out_dir: Path, fps: float = 2.0) -> Dict[str, Any]:
             else:
                 if run >= int(1*fps):
                     t = int((i - run/2)/fps)
-                    events.append({"t": t, "type": "coherent movement (group moving)", "detail": f"~{run/fps:.1f}s"})
+                    events.append({"t": t, "type": "coherent movement (group moving)", "detail": "approx {}s".format(run/fps)})
                 run = 0
         if run >= int(1*fps):
             t = int((len(mags) - run/2)/fps)
-            events.append({"t": t, "type": "coherent movement (group moving)", "detail": f"~{run/fps:.1f}s"})
+            events.append({"t": t, "type": "coherent movement (group moving)", "detail": "approx {}s".format(run/fps)})
     return {"mag": mags, "coh": coh, "events": events}
 
 def detect_motion(vals: List[float], fps: float = 2.0) -> Dict[str, Any]:
@@ -411,18 +374,18 @@ def detect_motion(vals: List[float], fps: float = 2.0) -> Dict[str, Any]:
     arr = np.array(vals, dtype=np.float32)
     med = float(np.median(arr)); mean = float(np.mean(arr)); std = float(np.std(arr))
 
-    # Freeze ≥2s
+    # Freeze >= 2s
     low_thr = med * 0.4; run = 0
     for i, v in enumerate(arr):
         if v <= low_thr: run += 1
         else:
             if run >= int(2*fps):
                 t = int((i - run/2)/fps)
-                out["events"].append({"t": t, "type": "freeze and listen", "detail": f"~{run/fps:.1f}s"})
+                out["events"].append({"t": t, "type": "freeze and listen", "detail": "approx {}s".format(run/fps)})
             run = 0
     if run >= int(2*fps):
         t = int((len(arr) - run/2)/fps)
-        out["events"].append({"t": t, "type": "freeze and listen", "detail": f"~{run/fps:.1f}s"})
+        out["events"].append({"t": t, "type": "freeze and listen", "detail": "approx {}s".format(run/fps)})
 
     # Stomp spikes
     if std > 0:
@@ -439,9 +402,9 @@ def detect_motion(vals: List[float], fps: float = 2.0) -> Dict[str, Any]:
             dom_idx = int(np.argmax(spec[1:]) + 1)
             dom_f = float(freqs[dom_idx])
             if 0.2 <= dom_f <= 0.6:
-                out["events"].append({"t": None, "type": "ear flapping (calm)", "detail": f"~{dom_f:.2f} Hz"})
+                out["events"].append({"t": None, "type": "ear flapping (calm)", "detail": "approx {:.2f} Hz".format(dom_f)})
             elif 0.8 <= dom_f <= 1.5:
-                out["events"].append({"t": None, "type": "ear flapping (agitated)", "detail": f"~{dom_f:.2f} Hz"})
+                out["events"].append({"t": None, "type": "ear flapping (agitated)", "detail": "approx {:.2f} Hz".format(dom_f)})
 
     if mean > med * 1.3:
         out["events"].append({"t": None, "type": "high excitement (motion)", "detail": "sustained"})
@@ -539,10 +502,14 @@ def interactions_from_tracks(tracks_per_frame: List[List[Dict[str,Any]]], fps: f
                 ear_run[tr["id"]] = ear_run.get(tr["id"],0)+1
             else:
                 if ear_run.get(tr["id"],0) >= int(1.0*fps):
-                    events.append({"t": int((t - ear_run[tr["id']]/2)/fps), "type":"ear spread (threat display)","detail":f"ratio≈{ratio:.2f}"})
+                    events.append({
+                        "t": int((t - ear_run[tr["id"]]/2)/fps),
+                        "type":"ear spread (threat display)",
+                        "detail":"ratio~{:.2f}".format(ratio)
+                    })
                 ear_run[tr["id"]] = 0
 
-        # Close-contact greeting: head-to-head proximity ≥1.5s
+        # Close-contact greeting: head-to-head proximity >= 1.5s
         for i in range(len(cur)):
             for j in range(i+1,len(cur)):
                 a,b = cur[i],cur[j]
@@ -554,9 +521,11 @@ def interactions_from_tracks(tracks_per_frame: List[List[Dict[str,Any]]], fps: f
                 if dist < 0.6*avg_w:
                     close_run[key] = close_run.get(key,0)+1
                     if close_run[key] == int(1.5*fps):
-                        events.append({"t": int((t - close_run[key]/2)/fps),
-                                       "type":"close-contact trunk greeting (possible twining / trunk-to-mouth)",
-                                       "detail":"sustained head proximity"})
+                        events.append({
+                            "t": int((t - close_run[key]/2)/fps),
+                            "type":"close-contact trunk greeting (possible twining / trunk-to-mouth)",
+                            "detail":"sustained head proximity"
+                        })
                 else:
                     close_run[key]=0
 
@@ -597,7 +566,6 @@ def fuse_audio_motion(segments: List[Dict[str, Any]], motion: Dict[str, Any]) ->
 def summarize(segments: List[Dict[str, Any]], motion_events: List[Dict[str, Any]], findings: List[str]):
     if not segments:
         return ("No clear elephant vocalizations detected (audio too quiet or noisy).", 0.4)
-    # if mostly ambient, say so
     meaningful = [s for s in segments if not s["label"].startswith("ambient")]
     if not meaningful:
         return ("Ambient/uncertain audio; no distinctive elephant calls.", 0.45)
@@ -608,26 +576,26 @@ def summarize(segments: List[Dict[str, Any]], motion_events: List[Dict[str, Any]
     top = max(score.items(), key=lambda kv: kv[1])[0]
     conf = float(np.median([s["confidence"] for s in meaningful])) if np is not None else 0.7
 
-    if "greeting chorus" in top: msg = "Family reunion chorus—overlapping rumbles with trumpets/roars; strong social excitement."
-    elif "let’s-go" in top:      msg = "Likely travel initiation—rising rumble; group preparing to move."
-    elif "musth" in top:        msg = "Musth-like buzz (male)—status/dominance broadcast."
-    elif "trumpet" in top:      msg = "Alarm/excitement—bright trumpet; keep distance."
-    elif "roar" in top:         msg = "Defensive/agitated—harsh roar; back away."
-    elif "estrous" in top:      msg = "Estrous rumble—female receptivity cue."
-    elif "contact rumble" in top: msg = "Contact rumble—maintaining social contact/coordination."
-    elif "resting" in top:      msg = "Calm/resting—low arousal and limited motion."
-    else:                       msg = "General calling—tonal activity without specialized cues."
+    if "greeting chorus" in top: msg = "Family reunion chorus: overlapping rumbles with trumpets/roars; strong social excitement."
+    elif "let's-go" in top:      msg = "Likely travel initiation: rising rumble; group preparing to move."
+    elif "musth" in top:        msg = "Musth-like buzz (male): status/dominance broadcast."
+    elif "trumpet" in top:      msg = "Alarm/excitement: bright trumpet; keep distance."
+    elif "roar" in top:         msg = "Defensive/agitated: harsh roar; back away."
+    elif "estrous" in top:      msg = "Estrous rumble: female receptivity cue."
+    elif "contact rumble" in top: msg = "Contact rumble: maintaining social contact/coordination."
+    elif "resting" in top:      msg = "Calm/resting: low arousal and limited motion."
+    else:                       msg = "General calling: tonal activity without specialized cues."
 
     notes = [ev["type"] for ev in motion_events if ev.get("t") is not None][:2]
-    if notes:    msg += f" Motion: {', '.join(notes)}."
-    if findings: msg += f" Extra: {', '.join(findings[:2])}."
+    if notes:    msg += " Motion: " + ", ".join(notes) + "."
+    if findings: msg += " Extra: " + ", ".join(findings[:2]) + "."
     return msg, conf
 
 # -------- Core analysis --------
 def analyze_media_file(path: Path, include_motion: bool) -> Dict[str, Any]:
     diagnostics = {"ffmpeg": has_ffmpeg(), "numpy": bool(np is not None), "pillow": bool(Image is not None),
                    "opencv": bool(cv2 is not None), "yolo": False, "scipy": bool(butter is not None)}
-    wav_tmp = UPLOAD_DIR / f"conv_{uuid.uuid4().hex}.wav"
+    wav_tmp = UPLOAD_DIR / ("conv_" + uuid.uuid4().hex + ".wav")
     audio_ok=False; motion={"series": [], "events": []}; duration=0.0
     try:
         if diagnostics["ffmpeg"]:
@@ -670,7 +638,6 @@ def analyze_media_file(path: Path, include_motion: bool) -> Dict[str, Any]:
         segments = fuse_audio_motion(segments, motion)
         summary_text, overall_conf = summarize(segments, motion.get("events", []), findings)
 
-        # quick species confidence heuristic: proportion of frames where low band dominates
         elephant_likely = float(np.mean([1.0 if (("rumble" in s["label"]) or ("chorus" in s["label"])) else 0.0 for s in segments])) if np is not None else 0.6
         species_conf = min(0.95, 0.55 + 0.45*elephant_likely)
 
@@ -697,7 +664,7 @@ def analyze_media_file(path: Path, include_motion: bool) -> Dict[str, Any]:
 # ------------------- API -------------------
 @app.get("/health")
 def health():
-    return {"status":"ok","api":"reset-stable v2 + richer audio"}
+    return {"status":"ok","api":"reset-stable v2.1 + richer audio (ascii)"}
 
 @app.get("/config")
 def config():
@@ -708,7 +675,7 @@ async def analyze(file: UploadFile = File(...), include_motion: bool = True):
     ext = Path(file.filename).suffix.lower()
     if ext not in SUPPORTED_VIDEO.union(SUPPORTED_AUDIO):
         return JSONResponse(status_code=400, content={"error": f"Unsupported type {ext}"})
-    tmp = UPLOAD_DIR / f"direct_{uuid.uuid4().hex}{ext}"
+    tmp = UPLOAD_DIR / ("direct_" + uuid.uuid4().hex + ext)
     size = 0
     with tmp.open("wb") as out:
         while True:
@@ -759,7 +726,7 @@ async def upload_part(request: Request, upload_id: str, index: int):
     data = await request.body()
     if not data:
         return JSONResponse(status_code=400, content={"error":"empty chunk"})
-    part_path = parts / f"part_{index:05d}.bin"
+    part_path = parts / ("part_{:05d}.bin".format(index))
     with part_path.open("wb") as f:
         f.write(data)
     meta = json.loads(meta_p.read_text())
@@ -779,12 +746,12 @@ async def upload_finish(upload_id: str, include_motion: bool = True, total_chunk
     if total_chunks <= 0:
         total_chunks = len(list(parts.glob("part_*.bin")))
     for i in range(total_chunks):
-        if not (parts / f"part_{i:05d}.bin").exists():
-            return JSONResponse(status_code=400, content={"error": f"missing chunk {i}"})
-    final_path = UPLOAD_DIR / f"chunked_{upload_id}{ext}"
+        if not (parts / ("part_{:05d}.bin".format(i))).exists():
+            return JSONResponse(status_code=400, content={"error": "missing chunk {}".format(i)})
+    final_path = UPLOAD_DIR / ("chunked_" + upload_id + ext)
     with final_path.open("wb") as out:
         for i in range(total_chunks):
-            p = parts / f"part_{i:05d}.bin"
+            p = parts / ("part_{:05d}.bin".format(i))
             with p.open("rb") as f:
                 shutil.copyfileobj(f, out)
     try:
