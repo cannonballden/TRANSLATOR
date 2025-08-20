@@ -1,9 +1,8 @@
-# api_v3.py — tiny wrapper that guarantees `app` exists and exposes a unique /health
+# api_v3.py — safe wrapper that never mutates routes
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.routing import APIRoute
 
-# Start with a fallback app so Uvicorn always has something to import
+# Fallback app, so uvicorn always has an ASGI app to import
 _fallback = FastAPI(title="Elephant Translator — wrapper")
 _fallback.add_middleware(
     CORSMiddleware,
@@ -11,24 +10,16 @@ _fallback.add_middleware(
 )
 
 try:
-    # Try importing the real backend from mini_api.py
-    from mini_api import app as _real
-    app = _real
+    # Import the real app and just ADD an extra endpoint (no overriding)
+    from mini_api import app as real_app
+    app = real_app
 
-    # Remove any existing GET /health so we can override it clearly
-    kept = []
-    for r in app.router.routes:
-        if isinstance(r, APIRoute) and r.path == "/health" and "GET" in r.methods:
-            continue
-        kept.append(r)
-    app.router.routes = kept
-
-    @app.get("/health")
-    def health():
-        return {"status":"ok","api":"reset-stable v1 (api_v3 wrapper)"}
+    @app.get("/wrapper-health")
+    def wrapper_health():
+        return {"status": "ok", "api": "reset-stable v1 (wrapper alive)"}
 
 except Exception as e:
-    # mini_api import failed — use fallback app with explanatory health
+    # If import fails, expose a minimal app that explains why
     app = _fallback
 
     @app.get("/health")
