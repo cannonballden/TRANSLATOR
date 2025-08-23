@@ -1,9 +1,7 @@
 soundcloud:
-  - https://soundcloud.com/elephantvoices   # Ethogram-labeled call examples (scientist curated)
+  - https://soundcloud.com/elephantvoices   # scientist-curated calls
 
-youtube_playlists:
-  - https://www.youtube.com/@savetheelephantskenya/videos  # Save the Elephants channel (expert org)
+youtube_playlists: []  # disabled to avoid sign-in/rate-limit
 
 vimeo_showcases:
-  - https://vimeo.com/showcase/theelephantethogram          # ElephantVoices Ethogram showcase (annotated)
-
+  - https://vimeo.com/showcase/theelephantethogram  # annotated ethogram clips
