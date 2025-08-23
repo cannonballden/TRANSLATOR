@@ -1,67 +1,54 @@
-# api_v3.py — safe wrapper that never 500s on /health
-# Behavior:
-# - If mini_api imports: expose its FastAPI app (so /health returns the mini_api version string).
-# - If import fails: expose a tiny fallback FastAPI app with a helpful /health.
-
-from fastapi import FastAPI
+# api_v3.py — unified wrapper that surfaces inner mini_api health/config/analyze
+import reprlib
+from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
-# Try to import the real app
-IMPORT_OK = False
-IMPORT_ERR = ""
-core_app = None
-core_health = None
+ALLOW_ORIGINS = ["*"]
+app = FastAPI(title="Translator API wrapper v3 (unified health)")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOW_ORIGINS,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    allow_credentials=False,
+)
 
 try:
-    import mini_api  # this should define 'app' and 'health'
-    core_app = mini_api.app
-    core_health = getattr(mini_api, "health", None)
-    IMPORT_OK = True
-except Exception as err:  # never reference 'e' out of scope again
-    IMPORT_OK = False
-    IMPORT_ERR = repr(err)
-    core_app = None
-    core_health = None
+    import mini_api as inner
+    INNER_OK = True
+    INNER_ERR = ""
+except Exception as e:
+    inner = None
+    INNER_OK = False
+    INNER_ERR = repr(e)
 
-if IMPORT_OK and core_app is not None:
-    # Use the real app directly so routes (including /health) are identical.
-    app = core_app
-
-    # Add an extra diagnostic endpoint without touching core routes.
-    @app.get("/wrapper-health")
-    def wrapper_health():
-        info = {"import_ok": True, "wrapper": "ok"}
+@app.get("/health")
+def health():
+    if INNER_OK:
         try:
-            if callable(core_health):
-                info["core_health"] = core_health()
-        except Exception as inner_err:
-            info["core_health_error"] = repr(inner_err)
-        return info
+            inner_h = inner.health()
+            return {"status":"ok", "api":"wrapper v3 + inner", "inner": inner_h}
+        except Exception as e:
+            return {"status":"ok", "api":"wrapper v3 (inner call failed)", "error": repr(e)}
+    else:
+        return {"status":"ok", "api":"wrapper-only (mini_api import failed)", "error": INNER_ERR}
 
-else:
-    # Fallback app that always answers /health with the import error.
-    app = FastAPI(title="Translator API wrapper (fallback)")
+@app.get("/config")
+def config():
+    if INNER_OK:
+        try:
+            return inner.config()
+        except Exception as e:
+            return {"error": f"inner config failed: {e}"}
+    return {"error": "mini_api not available"}
 
-    # Keep CORS permissive for the demo (GH Pages -> Codespaces)
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_methods=["*"],
-        allow_headers=["*"],
-        allow_credentials=False,
-    )
-
-    @app.get("/health")
-    def health():
-        return {
-            "status": "ok",
-            "api": "wrapper-only (mini_api import failed)",
-            "error": IMPORT_ERR
-        }
-
-    @app.get("/wrapper-health")
-    def wrapper_health():
-        return {
-            "import_ok": False,
-            "import_error": IMPORT_ERR
-        }
+@app.post("/analyze")
+async def analyze(file: UploadFile = File(...), include_motion: bool = True):
+    if INNER_OK:
+        try:
+            return await inner.analyze(file=file, include_motion=include_motion)
+        except Exception as e:
+            return JSONResponse(status_code=500, content={"error": f"inner analyze failed: {e}"})
+    return JSONResponse(status_code=500, content={"error":"mini_api not available"})
