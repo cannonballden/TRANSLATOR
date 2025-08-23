@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
+# HARDENED vA — no compute_class_weight, guards for tiny classes, ASCII-only
 # Trains a scikit-learn model on extracted segments; saves into models/
-# Hardened:
-# - No crash if a class has very few samples (falls back to no stratify).
-# - Uses class_weight="balanced" (no need to precompute weights).
-# - ASCII-only.
 
 import json
 from pathlib import Path
@@ -21,7 +18,6 @@ from sklearn.metrics import classification_report, confusion_matrix
 
 REPO = Path(__file__).resolve().parents[1]
 TRAIN_DIR = REPO / "training"
-SEG_DIR = TRAIN_DIR / "segments_audio"
 MAN_DIR = TRAIN_DIR / "manifests"
 MODEL_DIR = REPO / "models"
 MODEL_DIR.mkdir(exist_ok=True)
@@ -36,8 +32,8 @@ def band_rms(x, sr, lo, hi):
         return 0.0
     return float(np.sqrt(np.mean((mag[sel]) ** 2) + 1e-12))
 
-def feats_for_clip(wav: Path):
-    x, sr = sf.read(str(wav), always_2d=False)
+def feats_for_clip(wav_path: Path):
+    x, sr = sf.read(str(wav_path), always_2d=False)
     if x.ndim > 1:
         x = x.mean(axis=1)
     x = x.astype(np.float32)
@@ -118,7 +114,6 @@ def main():
     counts = Counter(y)
     print("Counts per class:", dict(counts))
 
-    # If any class count < 2, stratified split will fail; disable stratify in that case.
     min_count = min(counts.values()) if counts else 0
     use_stratify = min_count >= 2
 
@@ -127,7 +122,7 @@ def main():
             X, y, test_size=0.2, random_state=42, stratify=y
         )
     else:
-        print("Warning: at least one class has < 2 samples; using non-stratified split.")
+        print("Warning: a class has < 2 samples; using non-stratified split.")
         Xtr, Xte, ytr, yte = train_test_split(
             X, y, test_size=0.2, random_state=42, stratify=None
         )
@@ -135,7 +130,6 @@ def main():
     scaler = StandardScaler()
     Xtr_s = scaler.fit_transform(Xtr)
 
-    # Balanced logistic regression; lbfgs works fine here.
     clf = LogisticRegression(
         max_iter=500,
         class_weight="balanced",
